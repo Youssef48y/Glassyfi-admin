@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Production build
+dist/
+dist-ssr/
+
+# Local environment files (NEVER commit secrets)
+.env
+.env.*
+!.env.example
+
+# Editor & OS files
+.DS_Store
+*.local
+*.log
+.vscode/*
+!.vscode/extensions.json
+
+# Sensitive key files (defensive safeguard)
+*firebase-adminsdk*.json
+*service-account*.json
+*.pem
+*.key

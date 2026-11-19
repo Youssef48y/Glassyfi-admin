@@ -9,35 +9,21 @@ import {
   Loader2,
   Plus,
   Sparkles,
+  Link2,
+  Repeat,
 } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { supabase, triggerSilentSync } from '../lib/supabase';
 import { formatDateAr } from '../lib/formatters';
+import {
+  PUSH_TOPIC_OPTIONS,
+  POPUP_AUDIENCE_OPTIONS,
+  MAX_SHOWS_OPTIONS,
+  getTopicLabelAr,
+  getAudienceBadge,
+} from '../lib/constants';
 import { ToggleSwitch } from './ToggleSwitch';
 import { ConfirmDialog } from './ConfirmDialog';
-
-const PUSH_TOPICS = [
-  { value: 'all_users', label: 'الكل (جميع المستخدمين)' },
-  { value: 'pro_users', label: 'مشتركو Pro فقط' },
-  { value: 'free_users', label: 'المستخدمون المجانيون فقط' },
-];
-
-const POPUP_AUDIENCES = [
-  { value: 'all', label: 'الكل' },
-  { value: 'free', label: 'المجاني' },
-  { value: 'pro', label: 'Pro' },
-];
-
-function topicLabel(topic) {
-  if (topic === 'pro_users') return 'Pro فقط';
-  if (topic === 'free_users') return 'المجاني فقط';
-  return 'الكل';
-}
-
-function audienceLabel(aud) {
-  if (aud === 'pro') return 'Pro فقط';
-  if (aud === 'free') return 'المجاني فقط';
-  return 'الكل';
-}
+import { DeepLinkPicker } from './DeepLinkPicker';
 
 export function NotificationsTab({
   pushHistory,
@@ -52,6 +38,7 @@ export function NotificationsTab({
   const [pushBody, setPushBody] = useState('');
   const [pushImageUrl, setPushImageUrl] = useState('');
   const [pushTopic, setPushTopic] = useState('all_users');
+  const [pushDeepLink, setPushDeepLink] = useState('');
   const [sendingPush, setSendingPush] = useState(false);
 
   // Popup Form
@@ -59,8 +46,10 @@ export function NotificationsTab({
   const [popupBody, setPopupBody] = useState('');
   const [popupImageUrl, setPopupImageUrl] = useState('');
   const [popupActionText, setPopupActionText] = useState('');
+  const [popupDeepLink, setPopupDeepLink] = useState('');
   const [popupActionUrl, setPopupActionUrl] = useState('');
   const [popupAudience, setPopupAudience] = useState('all');
+  const [popupMaxShows, setPopupMaxShows] = useState(1);
   const [popupActive, setPopupActive] = useState(true);
   const [savingPopup, setSavingPopup] = useState(false);
 
@@ -72,6 +61,7 @@ export function NotificationsTab({
     const title = pushTitle.trim();
     const body = pushBody.trim();
     const image_url = pushImageUrl.trim() || null;
+    const deep_link = pushDeepLink.trim() || null;
 
     if (!title || !body) {
       notify('يرجى إدخال عنوان ونص الإشعار', 'error');
@@ -81,7 +71,7 @@ export function NotificationsTab({
     setSendingPush(true);
     try {
       const { data, error } = await supabase.functions.invoke('send-push', {
-        body: { title, body, topic: pushTopic, image_url },
+        body: { title, body, topic: pushTopic, image_url, deep_link },
       });
 
       if (error) {
@@ -95,6 +85,7 @@ export function NotificationsTab({
       setPushTitle('');
       setPushBody('');
       setPushImageUrl('');
+      setPushDeepLink('');
       await onRefresh();
     } catch (err) {
       notify(`خطأ في الإرسال: ${err.message}`, 'error');
@@ -117,19 +108,24 @@ export function NotificationsTab({
         body: popupBody.trim(),
         image_url: popupImageUrl.trim() || null,
         action_text: popupActionText.trim() || null,
-        action_url: popupActionUrl.trim() || null,
+        deep_link: popupDeepLink.trim() || null,
+        action_url: popupActionUrl.trim() || popupDeepLink.trim() || null,
         target_audience: popupAudience,
+        max_shows_per_user: Number(popupMaxShows),
         is_active: popupActive,
       });
 
       if (error) throw error;
-      notify('تمت إضافة الرسالة المنبثقة بنجاح', 'success');
+      triggerSilentSync({ topic: 'all_users' });
+      notify('تم نشر الرسالة المنبثقة ومزامنة التطبيقات فورياً', 'success');
       setPopupTitle('');
       setPopupBody('');
       setPopupImageUrl('');
       setPopupActionText('');
+      setPopupDeepLink('');
       setPopupActionUrl('');
       setPopupAudience('all');
+      setPopupMaxShows(1);
       setPopupActive(true);
       await onRefresh();
     } catch (err) {
@@ -148,6 +144,7 @@ export function NotificationsTab({
       notify(`تعذر تحديث الحالة: ${error.message}`, 'error');
       return;
     }
+    triggerSilentSync({ topic: 'all_users' });
     await onRefresh();
   }
 
@@ -160,6 +157,7 @@ export function NotificationsTab({
         .delete()
         .eq('id', deletePopupTarget.id);
       if (error) throw error;
+      triggerSilentSync({ topic: 'all_users' });
       notify('تم حذف الرسالة المنبثقة', 'success');
       setDeletePopupTarget(null);
       await onRefresh();
@@ -170,12 +168,19 @@ export function NotificationsTab({
     }
   }
 
+  function maxShowsLabel(n) {
+    if (n === 0) return 'كل مرة';
+    if (n === 1) return 'مرة واحدة';
+    if (n === 2) return 'مرتان';
+    return `${n} مرات`;
+  }
+
   return (
     <section>
       <div className="page-header">
         <div className="page-title-group">
           <h1>الإشعارات والرسائل المنبثقة</h1>
-          <p>إرسال إشعارات فورية عبر Firebase FCM وإدارة التنبيهات داخل التطبيق</p>
+          <p>إشعارات FCM فورية مع التوجيه العميق (Deep Links) ورسائل منبثقة محددة التكرار</p>
         </div>
 
         <div className="segmented">
@@ -205,12 +210,30 @@ export function NotificationsTab({
             <form onSubmit={handleSendPush} className="glass-panel section-card" style={{ marginBottom: 0 }}>
               <h2 className="section-heading">
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                  <Send size={18} color="var(--accent)" />
+                  <Send size={18} color="var(--primary)" />
                   إرسال إشعار فوري جديد
                 </span>
               </h2>
 
               <div className="form-grid">
+                <div className="field">
+                  <label className="field-label" htmlFor="push-topic">
+                    الجمهور المستهدف
+                  </label>
+                  <select
+                    id="push-topic"
+                    className="select"
+                    value={pushTopic}
+                    onChange={(e) => setPushTopic(e.target.value)}
+                  >
+                    {PUSH_TOPIC_OPTIONS.map((t) => (
+                      <option key={t.value} value={t.value}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
                 <div className="field">
                   <label className="field-label" htmlFor="push-title">
                     عنوان الإشعار *
@@ -253,23 +276,12 @@ export function NotificationsTab({
                   />
                 </div>
 
-                <div className="field">
-                  <label className="field-label" htmlFor="push-topic">
-                    الجمهور المستهدف
-                  </label>
-                  <select
-                    id="push-topic"
-                    className="select"
-                    value={pushTopic}
-                    onChange={(e) => setPushTopic(e.target.value)}
-                  >
-                    {PUSH_TOPICS.map((t) => (
-                      <option key={t.value} value={t.value}>
-                        {t.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                <DeepLinkPicker
+                  id="push-deeplink"
+                  label="قسم التوجيه عند الضغط على الإشعار (Deep Link)"
+                  value={pushDeepLink}
+                  onChange={setPushDeepLink}
+                />
 
                 <button
                   type="submit"
@@ -296,16 +308,16 @@ export function NotificationsTab({
             <div className="glass-panel section-card" style={{ marginBottom: 0 }}>
               <h2 className="section-heading">
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                  <Sparkles size={18} color="var(--gold)" />
+                  <Sparkles size={18} color="var(--amber)" />
                   معاينة الإشعار على أندرويد
                 </span>
-                <span className="badge badge-sky">{topicLabel(pushTopic)}</span>
+                <span className="badge badge-indigo">{getTopicLabelAr(pushTopic)}</span>
               </h2>
 
               <div className="push-preview">
                 <div className="push-preview-head">
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 600 }}>
-                    <Bell size={13} color="var(--accent)" />
+                    <Bell size={13} color="var(--primary)" />
                     Glassyfi
                   </span>
                   <span>الآن</span>
@@ -326,20 +338,27 @@ export function NotificationsTab({
                     }}
                   />
                 )}
+                {pushDeepLink.trim() && (
+                  <div style={{ marginTop: 4 }}>
+                    <span className="badge badge-indigo mono">
+                      <Link2 size={11} /> {pushDeepLink.trim()}
+                    </span>
+                  </div>
+                )}
               </div>
 
-              <p style={{ margin: '14px 0 0', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                يتم توقيع الطلب وإرساله بشكل آمن من خلال Supabase Edge Function (`send-push`)
-                باستخدام صلاحيات Firebase Admin المشفّرة على الخادم فقط.
+              <p style={{ margin: '14px 0 0', fontSize: '0.77rem', color: 'var(--text-muted)' }}>
+                يتم إرسال بيانات التوجيه العميق (`deep_link`) داخل حزمة FCM Data ليفتح التطبيق
+                مباشرة على القسم أو الخلفية المحددة.
               </p>
             </div>
           </div>
 
           {/* Push History */}
-          <div className="glass-panel section-card">
+          <div className="glass-panel section-card" style={{ marginBottom: 0 }}>
             <h2 className="section-heading">
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                <History size={18} color="var(--accent)" />
+                <History size={18} color="var(--primary)" />
                 سجل الإشعارات المرسلة ({pushHistory.length})
               </span>
             </h2>
@@ -354,15 +373,15 @@ export function NotificationsTab({
                   <div
                     key={item.id}
                     className="glass-subcard"
-                    style={{ padding: 14, display: 'flex', gap: 12, alignItems: 'flex-start' }}
+                    style={{ padding: 13, display: 'flex', gap: 12, alignItems: 'flex-start' }}
                   >
                     {item.image_url ? (
                       <img
                         src={item.image_url}
                         alt=""
                         style={{
-                          width: 56,
-                          height: 56,
+                          width: 54,
+                          height: 54,
                           borderRadius: 10,
                           objectFit: 'cover',
                           flexShrink: 0,
@@ -371,17 +390,17 @@ export function NotificationsTab({
                     ) : (
                       <div
                         style={{
-                          width: 42,
-                          height: 42,
+                          width: 40,
+                          height: 40,
                           borderRadius: 11,
-                          background: 'var(--accent-soft)',
+                          background: 'var(--primary-soft)',
                           display: 'grid',
                           placeItems: 'center',
-                          color: 'var(--accent)',
+                          color: 'var(--primary)',
                           flexShrink: 0,
                         }}
                       >
-                        <Bell size={18} />
+                        <Bell size={17} />
                       </div>
                     )}
 
@@ -396,7 +415,16 @@ export function NotificationsTab({
                         }}
                       >
                         <strong>{item.title}</strong>
-                        <span className="badge badge-neutral">{topicLabel(item.topic)}</span>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                          <span className="badge badge-neutral">
+                            {item.target_label
+                              ? `${getTopicLabelAr(item.topic)}: ${item.target_label}`
+                              : getTopicLabelAr(item.topic)}
+                          </span>
+                          {item.deep_link && (
+                            <span className="badge badge-indigo mono">{item.deep_link}</span>
+                          )}
+                        </div>
                       </div>
                       <p
                         style={{
@@ -407,7 +435,7 @@ export function NotificationsTab({
                       >
                         {item.body}
                       </p>
-                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                      <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
                         {formatDateAr(item.sent_at)}
                       </span>
                     </div>
@@ -423,12 +451,12 @@ export function NotificationsTab({
           <form onSubmit={handleCreatePopup} className="glass-panel section-card">
             <h2 className="section-heading">
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                <MessageSquareMore size={18} color="var(--accent)" />
+                <MessageSquareMore size={18} color="var(--primary)" />
                 إنشاء رسالة منبثقة داخل التطبيق
               </span>
             </h2>
 
-            <div className="form-grid cols-2" style={{ marginBottom: 14 }}>
+            <div className="form-grid cols-3" style={{ marginBottom: 14 }}>
               <div className="field">
                 <label className="field-label" htmlFor="pop-title">
                   العنوان *
@@ -445,7 +473,7 @@ export function NotificationsTab({
 
               <div className="field">
                 <label className="field-label" htmlFor="pop-aud">
-                  الفئة المستهدفة
+                  الجمهور المستهدف
                 </label>
                 <select
                   id="pop-aud"
@@ -453,9 +481,27 @@ export function NotificationsTab({
                   value={popupAudience}
                   onChange={(e) => setPopupAudience(e.target.value)}
                 >
-                  {POPUP_AUDIENCES.map((a) => (
+                  {POPUP_AUDIENCE_OPTIONS.map((a) => (
                     <option key={a.value} value={a.value}>
                       {a.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="field">
+                <label className="field-label" htmlFor="pop-shows">
+                  عدد مرات الظهور لكل مستخدم
+                </label>
+                <select
+                  id="pop-shows"
+                  className="select"
+                  value={popupMaxShows}
+                  onChange={(e) => setPopupMaxShows(Number(e.target.value))}
+                >
+                  {MAX_SHOWS_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
                     </option>
                   ))}
                 </select>
@@ -476,7 +522,20 @@ export function NotificationsTab({
               />
             </div>
 
-            <div className="form-grid cols-3" style={{ marginBottom: 14 }}>
+            <div className="form-grid cols-2" style={{ marginBottom: 14 }}>
+              <div className="field">
+                <label className="field-label" htmlFor="pop-btn">
+                  نص زر الإجراء (CTA) <span className="field-hint">(اختياري)</span>
+                </label>
+                <input
+                  id="pop-btn"
+                  className="input"
+                  placeholder="مثال: افتح استوديو العمق"
+                  value={popupActionText}
+                  onChange={(e) => setPopupActionText(e.target.value)}
+                />
+              </div>
+
               <div className="field">
                 <label className="field-label" htmlFor="pop-img">
                   رابط الصورة <span className="field-hint">(اختياري)</span>
@@ -490,23 +549,19 @@ export function NotificationsTab({
                   onChange={(e) => setPopupImageUrl(e.target.value)}
                 />
               </div>
+            </div>
 
-              <div className="field">
-                <label className="field-label" htmlFor="pop-btn">
-                  نص الزر <span className="field-hint">(اختياري)</span>
-                </label>
-                <input
-                  id="pop-btn"
-                  className="input"
-                  placeholder="مثال: اكتشف الآن"
-                  value={popupActionText}
-                  onChange={(e) => setPopupActionText(e.target.value)}
-                />
-              </div>
+            <div className="form-grid cols-2" style={{ marginBottom: 14 }}>
+              <DeepLinkPicker
+                id="pop-deeplink"
+                label="توجيه زر الرسالة (Deep Link)"
+                value={popupDeepLink}
+                onChange={setPopupDeepLink}
+              />
 
               <div className="field">
                 <label className="field-label" htmlFor="pop-url">
-                  رابط الزر <span className="field-hint">(اختياري)</span>
+                  رابط خارجي بديل <span className="field-hint">(اختياري)</span>
                 </label>
                 <input
                   id="pop-url"
@@ -529,7 +584,7 @@ export function NotificationsTab({
               }}
             >
               <div className="switch-row" style={{ minWidth: 220 }}>
-                <span className="switch-title">مفعّلة فور الحفظ</span>
+                <span className="switch-title">مفعّلة فور النشر</span>
                 <ToggleSwitch
                   checked={popupActive}
                   tone="emerald"
@@ -539,7 +594,7 @@ export function NotificationsTab({
 
               <button type="submit" className="btn btn-primary" disabled={savingPopup}>
                 <Plus size={16} />
-                {savingPopup ? 'جاري الحفظ...' : 'نشر الرسالة المنبثقة'}
+                {savingPopup ? 'جاري النشر...' : 'نشر الرسالة المنبثقة'}
               </button>
             </div>
           </form>
@@ -553,97 +608,92 @@ export function NotificationsTab({
             </div>
           ) : (
             <div className="cards-grid cols-2">
-              {popups.map((popup) => (
-                <article key={popup.id} className="glass-panel user-card">
-                  {popup.image_url && (
-                    <img
-                      src={popup.image_url}
-                      alt={popup.title}
-                      style={{
-                        width: '100%',
-                        maxHeight: 160,
-                        objectFit: 'cover',
-                        borderRadius: 12,
-                      }}
-                    />
-                  )}
-
-                  <div className="user-card-top">
-                    <strong style={{ fontSize: '1rem' }}>{popup.title}</strong>
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <span className="badge badge-sky">
-                        {audienceLabel(popup.target_audience)}
-                      </span>
-                      <span
-                        className={`badge ${popup.is_active ? 'badge-emerald' : 'badge-neutral'}`}
-                      >
-                        {popup.is_active ? 'نشطة' : 'متوقفة'}
-                      </span>
-                    </div>
-                  </div>
-
-                  <p style={{ margin: 0, fontSize: '0.86rem', color: 'var(--text-secondary)' }}>
-                    {popup.body}
-                  </p>
-
-                  {popup.action_text && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.8rem' }}>
-                      <span className="badge badge-neutral">
-                        <ExternalLink size={12} /> {popup.action_text}
-                      </span>
-                      {popup.action_url && (
-                        <a
-                          href={popup.action_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="ltr"
-                          style={{
-                            color: 'var(--accent)',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {popup.action_url}
-                        </a>
-                      )}
-                    </div>
-                  )}
-
-                  <div
-                    style={{
-                      marginTop: 'auto',
-                      paddingTop: 10,
-                      borderTop: '1px solid var(--glass-border)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                    }}
-                  >
-                    <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                      {formatDateAr(popup.created_at)}
-                    </span>
-
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <ToggleSwitch
-                        checked={popup.is_active}
-                        tone="emerald"
-                        onChange={() => handleTogglePopup(popup)}
-                        ariaLabel={`تفعيل الرسالة ${popup.title}`}
+              {popups.map((popup) => {
+                const aud = getAudienceBadge(popup.target_audience);
+                return (
+                  <article key={popup.id} className="glass-panel user-card">
+                    {popup.image_url && (
+                      <img
+                        src={popup.image_url}
+                        alt={popup.title}
+                        style={{
+                          width: '100%',
+                          maxHeight: 160,
+                          objectFit: 'cover',
+                          borderRadius: 11,
+                        }}
                       />
-                      <button
-                        type="button"
-                        className="btn btn-danger btn-icon"
-                        style={{ width: 32, height: 32 }}
-                        onClick={() => setDeletePopupTarget(popup)}
-                        aria-label={`حذف ${popup.title}`}
-                      >
-                        <Trash2 size={14} />
-                      </button>
+                    )}
+
+                    <div className="user-card-top">
+                      <strong style={{ fontSize: '0.98rem' }}>{popup.title}</strong>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                        <span className={`badge ${aud.className}`}>{aud.label}</span>
+                        <span className="badge badge-sky">
+                          <Repeat size={11} /> {maxShowsLabel(popup.max_shows_per_user ?? 1)}
+                        </span>
+                        <span
+                          className={`badge ${popup.is_active ? 'badge-emerald' : 'badge-neutral'}`}
+                        >
+                          {popup.is_active ? 'نشطة' : 'متوقفة'}
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                </article>
-              ))}
+
+                    <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                      {popup.body}
+                    </p>
+
+                    {(popup.action_text || popup.deep_link || popup.action_url) && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 7, fontSize: '0.78rem' }}>
+                        {popup.action_text && (
+                          <span className="badge badge-neutral">
+                            <ExternalLink size={11} /> {popup.action_text}
+                          </span>
+                        )}
+                        {popup.deep_link && (
+                          <span className="badge badge-indigo mono">
+                            <Link2 size={11} /> {popup.deep_link}
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    <div
+                      style={{
+                        marginTop: 'auto',
+                        paddingTop: 10,
+                        borderTop: '1px solid var(--glass-border)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                        {formatDateAr(popup.created_at)}
+                      </span>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <ToggleSwitch
+                          checked={popup.is_active}
+                          tone="emerald"
+                          onChange={() => handleTogglePopup(popup)}
+                          ariaLabel={`تفعيل الرسالة ${popup.title}`}
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-danger btn-icon"
+                          style={{ width: 30, height: 30 }}
+                          onClick={() => setDeletePopupTarget(popup)}
+                          aria-label={`حذف ${popup.title}`}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
             </div>
           )}
         </>

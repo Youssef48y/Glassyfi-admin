@@ -26,7 +26,7 @@ export function ConfirmDialog({
           <h2 style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
             <AlertTriangle
               size={20}
-              color={danger ? 'var(--danger)' : 'var(--accent)'}
+              color={danger ? 'var(--rose)' : 'var(--primary)'}
             />
             {title}
           </h2>

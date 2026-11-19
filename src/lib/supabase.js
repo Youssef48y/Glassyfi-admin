@@ -31,3 +31,22 @@ export async function verifyAdminAccess(userId) {
   }
   return { isAdmin: true, record: data };
 }
+
+/**
+ * Triggers a data-only FCM silent sync ping so live Android apps refresh within ~1 second.
+ */
+export async function triggerSilentSync({ topic = 'all_users', fcmToken = null } = {}) {
+  try {
+    const body = fcmToken
+      ? { silent_sync: true, fcm_token: fcmToken }
+      : { silent_sync: true, topic };
+
+    const { data, error } = await supabase.functions.invoke('send-push', { body });
+    if (error || !data?.ok) {
+      return { ok: false, error: error?.message || data?.error || 'silent_sync_failed' };
+    }
+    return { ok: true, messageId: data.messageId };
+  } catch (err) {
+    return { ok: false, error: err?.message || 'silent_sync_exception' };
+  }
+}

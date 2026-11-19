@@ -9,10 +9,12 @@ export default defineConfig({
     sourcemap: false,
     rollupOptions: {
       output: {
-        manualChunks: {
-          react: ['react', 'react-dom'],
-          supabase: ['@supabase/supabase-js'],
-          icons: ['lucide-react'],
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined;
+          if (id.includes('@supabase')) return 'supabase';
+          if (id.includes('recharts') || id.includes('d3-')) return 'charts';
+          if (id.includes('lucide-react')) return 'icons';
+          return 'vendor';
         },
       },
     },

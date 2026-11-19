@@ -18,8 +18,9 @@ import {
   X,
   Loader2,
   Check,
+  Link2,
 } from 'lucide-react';
-import { supabase, WALLPAPERS_BUCKET } from '../lib/supabase';
+import { supabase, triggerSilentSync, WALLPAPERS_BUCKET } from '../lib/supabase';
 import {
   validateImageFile,
   getExtensionFromFile,
@@ -30,6 +31,7 @@ import {
   generateUniqueId,
 } from '../lib/imageUtils';
 import { slugifyCategory } from '../lib/formatters';
+import { AUDIENCE_OPTIONS, getAudienceBadge } from '../lib/constants';
 import { ToggleSwitch } from './ToggleSwitch';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -44,6 +46,7 @@ const INITIAL_FORM = {
   title_en: '',
   category_slug: 'depth',
   wallpaper_type: 'depth',
+  target_audience: 'all',
   sort_order: 0,
   is_new: true,
   is_exclusive: false,
@@ -64,6 +67,7 @@ export function WallpapersTab({
   // Filters
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [selectedType, setSelectedType] = useState('all');
+  const [selectedAudience, setSelectedAudience] = useState('all_filter');
   const [searchQuery, setSearchQuery] = useState('');
 
   // Upload form state
@@ -78,6 +82,7 @@ export function WallpapersTab({
   // Card states
   const [busyCardIds, setBusyCardIds] = useState({});
   const [nightPreviewMap, setNightPreviewMap] = useState({});
+  const [copiedId, setCopiedId] = useState('');
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -119,6 +124,9 @@ export function WallpapersTab({
       if (selectedType !== 'all' && item.wallpaper_type !== selectedType) {
         return false;
       }
+      if (selectedAudience !== 'all_filter' && (item.target_audience || 'all') !== selectedAudience) {
+        return false;
+      }
       if (q) {
         const matchAr = (item.title_ar || '').toLowerCase().includes(q);
         const matchEn = (item.title_en || '').toLowerCase().includes(q);
@@ -126,7 +134,21 @@ export function WallpapersTab({
       }
       return true;
     });
-  }, [wallpapers, selectedCategory, selectedType, searchQuery]);
+  }, [wallpapers, selectedCategory, selectedType, selectedAudience, searchQuery]);
+
+  async function copyDeepLink(wpId) {
+    const link = `glassyfi://wallpaper/${wpId}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopiedId(wpId);
+      notify(`تم نسخ رابط العمق المباشر: ${link}`, 'info');
+      setTimeout(() => {
+        setCopiedId((prev) => (prev === wpId ? '' : prev));
+      }, 1800);
+    } catch {
+      notify('تعذر النسخ التلقائي', 'error');
+    }
+  }
 
   function handleSelectDayFile(e) {
     const file = e.target.files?.[0];
@@ -207,21 +229,18 @@ export function WallpapersTab({
     try {
       const uid = generateUniqueId();
 
-      // 1. Generate lightweight WebP thumbnail client-side (original stays 100% lossless)
       setUploadStage('جاري توليد الصورة المصغّرة (WebP)...');
       const thumb = await generateThumbnailBlob(dayFile, 480, 0.78);
       const thumbPath = `thumbs/${uid}.${thumb.ext}`;
       const thumbnailUrl = await uploadToBucket(thumbPath, thumb.blob, thumb.contentType);
       uploadedPaths.push(thumbPath);
 
-      // 2. Upload 100% untouched original file
       setUploadStage('جاري رفع الصورة الأصلية بدون ضغط...');
       const dayExt = getExtensionFromFile(dayFile);
       const dayPath = `originals/${uid}.${dayExt}`;
       const imageUrl = await uploadToBucket(dayPath, dayFile, dayFile.type);
       uploadedPaths.push(dayPath);
 
-      // 3. Upload night image if dual_day_night
       let nightImageUrl = null;
       if (form.wallpaper_type === 'dual_day_night' && nightFile) {
         setUploadStage('جاري رفع صورة الليل الأصلية...');
@@ -231,14 +250,14 @@ export function WallpapersTab({
         uploadedPaths.push(nightPath);
       }
 
-      // 4. Insert metadata row
-      setUploadStage('جاري حفظ بيانات الخلفية...');
+      setUploadStage('جاري الحفظ وتحديث التطبيقات...');
       const badgeType = deriveBadgeType(form);
       const { error: insertError } = await supabase.from('wallpapers').insert({
         title_ar: titleAr,
         title_en: form.title_en.trim() || null,
         category_slug: form.category_slug || null,
         wallpaper_type: form.wallpaper_type,
+        target_audience: form.target_audience,
         image_url: imageUrl,
         night_image_url: nightImageUrl,
         thumbnail_url: thumbnailUrl,
@@ -252,12 +271,12 @@ export function WallpapersTab({
 
       if (insertError) throw insertError;
 
-      notify('تم رفع الخلفية الأصلية ونشرها بنجاح', 'success');
+      triggerSilentSync({ topic: 'all_users' });
+      notify('تم رفع الخلفية الأصلية ومزامنة التطبيقات فورياً', 'success');
       resetUploadForm();
       setShowAddForm(false);
       await onRefresh();
     } catch (err) {
-      // Rollback any uploaded files if DB insert failed
       if (uploadedPaths.length > 0) {
         await supabase.storage.from(WALLPAPERS_BUCKET).remove(uploadedPaths);
       }
@@ -289,9 +308,29 @@ export function WallpapersTab({
         .eq('id', wallpaper.id);
 
       if (error) throw error;
+      triggerSilentSync({ topic: 'all_users' });
       await onRefresh();
     } catch (err) {
       notify(`فشل التحديث: ${err.message}`, 'error');
+    } finally {
+      setBusyCardIds((prev) => ({ ...prev, [wallpaper.id]: false }));
+    }
+  }
+
+  async function handleChangeAudience(wallpaper, audience) {
+    if ((wallpaper.target_audience || 'all') === audience) return;
+    setBusyCardIds((prev) => ({ ...prev, [wallpaper.id]: true }));
+    try {
+      const { error } = await supabase
+        .from('wallpapers')
+        .update({ target_audience: audience })
+        .eq('id', wallpaper.id);
+      if (error) throw error;
+      triggerSilentSync({ topic: 'all_users' });
+      notify('تم تحديث جمهور الخلفية وإرسال المزامنة الفورية', 'success');
+      await onRefresh();
+    } catch (err) {
+      notify(`فشل تحديث الجمهور: ${err.message}`, 'error');
     } finally {
       setBusyCardIds((prev) => ({ ...prev, [wallpaper.id]: false }));
     }
@@ -307,7 +346,6 @@ export function WallpapersTab({
         .eq('id', deleteTarget.id);
       if (error) throw error;
 
-      // Clean up associated storage files
       const paths = [
         extractStoragePath(deleteTarget.image_url),
         extractStoragePath(deleteTarget.night_image_url),
@@ -318,6 +356,7 @@ export function WallpapersTab({
         await supabase.storage.from(WALLPAPERS_BUCKET).remove(paths);
       }
 
+      triggerSilentSync({ topic: 'all_users' });
       notify('تم حذف الخلفية وملفاتها بنجاح', 'success');
       setDeleteTarget(null);
       await onRefresh();
@@ -350,6 +389,7 @@ export function WallpapersTab({
       });
       if (error) throw error;
 
+      triggerSilentSync({ topic: 'all_users' });
       notify('تمت إضافة القسم بنجاح', 'success');
       setCatNameAr('');
       setCatNameEn('');
@@ -372,6 +412,7 @@ export function WallpapersTab({
       notify(`فشل تحديث القسم: ${error.message}`, 'error');
       return;
     }
+    triggerSilentSync({ topic: 'all_users' });
     await onRefresh();
   }
 
@@ -384,6 +425,7 @@ export function WallpapersTab({
         .delete()
         .eq('id', deleteCategoryTarget.id);
       if (error) throw error;
+      triggerSilentSync({ topic: 'all_users' });
       notify('تم حذف القسم بنجاح', 'success');
       setDeleteCategoryTarget(null);
       await onRefresh();
@@ -405,7 +447,7 @@ export function WallpapersTab({
       <div className="page-header">
         <div className="page-title-group">
           <h1>الخلفيات</h1>
-          <p>رفع خلفيات أصلية بجودة كاملة مع توليد مصغّرات سريعة تلقائياً</p>
+          <p>رفع خلفيات أصلية بجودة كاملة، استهداف المختبر أو المطورين، ومزامنة فورية</p>
         </div>
 
         <div className="header-actions">
@@ -414,15 +456,15 @@ export function WallpapersTab({
             className="btn btn-secondary"
             onClick={() => setShowCategoriesModal(true)}
           >
-            <FolderKanban size={17} />
-            إدارة الأقسام ({categories.length})
+            <FolderKanban size={16} />
+            الأقسام ({categories.length})
           </button>
           <button
             type="button"
             className="btn btn-primary"
             onClick={() => setShowAddForm((prev) => !prev)}
           >
-            {showAddForm ? <X size={17} /> : <Plus size={17} />}
+            {showAddForm ? <X size={16} /> : <Plus size={16} />}
             {showAddForm ? 'إغلاق النموذج' : 'إضافة خلفية جديدة'}
           </button>
         </div>
@@ -433,17 +475,17 @@ export function WallpapersTab({
         <form
           onSubmit={handleCreateWallpaper}
           className="glass-panel section-card"
-          style={{ marginBottom: 22 }}
+          style={{ marginBottom: 20 }}
         >
           <h2 className="section-heading">
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-              <Upload size={18} color="var(--accent)" />
+              <Upload size={18} color="var(--primary)" />
               رفع خلفية جديدة (Lossless Original)
             </span>
-            <span className="badge badge-sky">حتى 25MB • WebP Thumb تلقائي</span>
+            <span className="badge badge-indigo">حتى 25MB • WebP Thumb تلقائي</span>
           </h2>
 
-          <div className="form-grid cols-2" style={{ marginBottom: 16 }}>
+          <div className="form-grid cols-2" style={{ marginBottom: 15 }}>
             <div className="field">
               <label className="field-label" htmlFor="wp-title-ar">
                 العنوان بالعربية *
@@ -503,31 +545,48 @@ export function WallpapersTab({
             </div>
           </div>
 
-          {/* Wallpaper Type Segmented Control */}
-          <div className="field" style={{ marginBottom: 16 }}>
-            <span className="field-label">نوع الخلفية</span>
-            <div className="segmented">
-              {WALLPAPER_TYPES.map((t) => {
-                const Icon = t.icon;
-                return (
+          <div className="form-grid cols-2" style={{ marginBottom: 15 }}>
+            <div className="field">
+              <span className="field-label">نوع الخلفية</span>
+              <div className="segmented">
+                {WALLPAPER_TYPES.map((t) => {
+                  const Icon = t.icon;
+                  return (
+                    <button
+                      key={t.value}
+                      type="button"
+                      className={`segmented-btn${form.wallpaper_type === t.value ? ' active' : ''}`}
+                      onClick={() => setForm((p) => ({ ...p, wallpaper_type: t.value }))}
+                    >
+                      <Icon size={14} />
+                      {t.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="field">
+              <span className="field-label">الجمهور المستهدف (معاينة قبل الإطلاق)</span>
+              <div className="segmented">
+                {AUDIENCE_OPTIONS.map((opt) => (
                   <button
-                    key={t.value}
+                    key={opt.value}
                     type="button"
-                    className={`segmented-btn${form.wallpaper_type === t.value ? ' active' : ''}`}
-                    onClick={() => setForm((p) => ({ ...p, wallpaper_type: t.value }))}
+                    className={`segmented-btn${form.target_audience === opt.value ? ' active' : ''}`}
+                    onClick={() => setForm((p) => ({ ...p, target_audience: opt.value }))}
                   >
-                    <Icon size={15} />
-                    {t.label}
+                    {opt.label}
                   </button>
-                );
-              })}
+                ))}
+              </div>
             </div>
           </div>
 
           {/* File Dropzones */}
           <div
             className={`form-grid ${form.wallpaper_type === 'dual_day_night' ? 'cols-2' : ''}`}
-            style={{ marginBottom: 16 }}
+            style={{ marginBottom: 15 }}
           >
             <div className="field">
               <span className="field-label">
@@ -535,9 +594,7 @@ export function WallpapersTab({
                   ? 'صورة النهار الأصلية *'
                   : 'الصورة الأصلية (بدون ضغط) *'}
                 {dayFile && (
-                  <span className="badge badge-emerald">
-                    {formatFileSize(dayFile.size)}
-                  </span>
+                  <span className="badge badge-emerald">{formatFileSize(dayFile.size)}</span>
                 )}
               </span>
               <label className={`dropzone${dayFile ? ' has-file' : ''}`}>
@@ -553,7 +610,7 @@ export function WallpapersTab({
                   </>
                 ) : (
                   <>
-                    <Upload size={26} color="var(--accent)" />
+                    <Upload size={25} color="var(--primary)" />
                     <strong>اختر الصورة أو اسحبها هنا</strong>
                     <span className="field-hint">
                       JPG / PNG / WebP • ترفع بجودتها الأصلية 100%
@@ -568,9 +625,7 @@ export function WallpapersTab({
                 <span className="field-label">
                   صورة الليل الأصلية *
                   {nightFile && (
-                    <span className="badge badge-sky">
-                      {formatFileSize(nightFile.size)}
-                    </span>
+                    <span className="badge badge-indigo">{formatFileSize(nightFile.size)}</span>
                   )}
                 </span>
                 <label className={`dropzone${nightFile ? ' has-file' : ''}`}>
@@ -590,7 +645,7 @@ export function WallpapersTab({
                     </>
                   ) : (
                     <>
-                      <Moon size={26} color="var(--accent)" />
+                      <Moon size={25} color="var(--primary)" />
                       <strong>اختر صورة الليل</strong>
                       <span className="field-hint">تُعرض تلقائياً في الوضع الليلي</span>
                     </>
@@ -601,18 +656,18 @@ export function WallpapersTab({
           </div>
 
           {/* Badge & Visibility Switches */}
-          <div className="form-grid cols-2" style={{ marginBottom: 18 }}>
+          <div className="form-grid cols-2" style={{ marginBottom: 16 }}>
             <div className="switch-row">
               <div className="switch-meta">
                 <span className="switch-title">
-                  <Sparkles size={15} color="var(--accent)" /> جديد (New)
+                  <Sparkles size={15} color="var(--primary)" /> جديد (New)
                 </span>
                 <span className="switch-desc">إظهار شارة "جديد" على البطاقة</span>
               </div>
               <ToggleSwitch
                 checked={form.is_new}
                 onChange={(v) => setForm((p) => ({ ...p, is_new: v }))}
-                tone="sky"
+                tone="indigo"
                 ariaLabel="جديد"
               />
             </div>
@@ -635,14 +690,14 @@ export function WallpapersTab({
             <div className="switch-row">
               <div className="switch-meta">
                 <span className="switch-title">
-                  <Crown size={15} color="var(--gold)" /> Pro (تاج ذهبي)
+                  <Crown size={15} color="var(--amber)" /> Pro (تاج ذهبي)
                 </span>
                 <span className="switch-desc">متاحة لمشتركي باقة Pro فقط</span>
               </div>
               <ToggleSwitch
                 checked={form.is_pro}
                 onChange={(v) => setForm((p) => ({ ...p, is_pro: v }))}
-                tone="gold"
+                tone="amber"
                 ariaLabel="Pro"
               />
             </div>
@@ -678,12 +733,12 @@ export function WallpapersTab({
             <button type="submit" className="btn btn-primary" disabled={uploading}>
               {uploading ? (
                 <>
-                  <Loader2 size={17} className="spinner" />
+                  <Loader2 size={16} className="spinner" />
                   {uploadStage || 'جاري الرفع...'}
                 </>
               ) : (
                 <>
-                  <Check size={17} />
+                  <Check size={16} />
                   رفع وحفظ الخلفية
                 </>
               )}
@@ -692,7 +747,7 @@ export function WallpapersTab({
         </form>
       )}
 
-      {/* Search & Filter Bar */}
+      {/* Search & Filters */}
       <div className="glass-panel section-card" style={{ padding: 14 }}>
         <div className="form-grid cols-2" style={{ marginBottom: 12 }}>
           <div className="input-with-icon">
@@ -708,39 +763,41 @@ export function WallpapersTab({
             />
           </div>
 
-          <div className="segmented" style={{ justifySelf: 'start' }}>
-            <button
-              type="button"
-              className={`segmented-btn${selectedType === 'all' ? ' active' : ''}`}
-              onClick={() => setSelectedType('all')}
-            >
-              الكل ({wallpapers.length})
-            </button>
-            <button
-              type="button"
-              className={`segmented-btn${selectedType === 'depth' ? ' active' : ''}`}
-              onClick={() => setSelectedType('depth')}
-            >
-              عمق
-            </button>
-            <button
-              type="button"
-              className={`segmented-btn${selectedType === 'dual_day_night' ? ' active' : ''}`}
-              onClick={() => setSelectedType('dual_day_night')}
-            >
-              نهار وليل
-            </button>
-            <button
-              type="button"
-              className={`segmented-btn${selectedType === 'standard' ? ' active' : ''}`}
-              onClick={() => setSelectedType('standard')}
-            >
-              عادية
-            </button>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            <div className="segmented">
+              <button
+                type="button"
+                className={`segmented-btn${selectedType === 'all' ? ' active' : ''}`}
+                onClick={() => setSelectedType('all')}
+              >
+                الكل ({wallpapers.length})
+              </button>
+              <button
+                type="button"
+                className={`segmented-btn${selectedType === 'depth' ? ' active' : ''}`}
+                onClick={() => setSelectedType('depth')}
+              >
+                عمق
+              </button>
+              <button
+                type="button"
+                className={`segmented-btn${selectedType === 'dual_day_night' ? ' active' : ''}`}
+                onClick={() => setSelectedType('dual_day_night')}
+              >
+                نهار وليل
+              </button>
+              <button
+                type="button"
+                className={`segmented-btn${selectedType === 'standard' ? ' active' : ''}`}
+                onClick={() => setSelectedType('standard')}
+              >
+                عادية
+              </button>
+            </div>
           </div>
         </div>
 
-        <div className="filter-strip" style={{ marginBottom: 0 }}>
+        <div className="filter-strip" style={{ marginBottom: 8 }}>
           <button
             type="button"
             className={`chip${selectedCategory === 'all' ? ' active' : ''}`}
@@ -760,12 +817,31 @@ export function WallpapersTab({
             </button>
           ))}
         </div>
+
+        <div className="filter-strip" style={{ marginBottom: 0 }}>
+          <span className="field-hint" style={{ marginLeft: 4 }}>الجمهور:</span>
+          {[
+            { id: 'all_filter', label: 'الكل' },
+            { id: 'all', label: 'عام (الكل)' },
+            { id: 'lab', label: 'المختبر والمطورين' },
+            { id: 'dev', label: 'المطورين فقط' },
+          ].map((aud) => (
+            <button
+              key={aud.id}
+              type="button"
+              className={`chip${selectedAudience === aud.id ? ' active' : ''}`}
+              onClick={() => setSelectedAudience(aud.id)}
+            >
+              {aud.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Wallpapers Grid */}
       {loading && wallpapers.length === 0 ? (
         <div className="glass-panel empty-state">
-          <Loader2 size={28} className="spinner" color="var(--accent)" />
+          <Loader2 size={28} className="spinner" color="var(--primary)" />
           <span>جاري تحميل الخلفيات...</span>
         </div>
       ) : filteredWallpapers.length === 0 ? (
@@ -775,7 +851,7 @@ export function WallpapersTab({
           </div>
           <strong>لا توجد خلفيات مطابقة حالياً</strong>
           <span style={{ fontSize: '0.84rem' }}>
-            اضغط على "إضافة خلفية جديدة" لرفع أول خلفية بجودة أصلية.
+            اضغط على "إضافة خلفية جديدة" لرفع خلفية بجودة أصلية وتحديد جمهورها.
           </span>
         </div>
       ) : (
@@ -788,6 +864,8 @@ export function WallpapersTab({
                 ? wp.night_image_url
                 : wp.thumbnail_url || wp.image_url;
             const isBusy = Boolean(busyCardIds[wp.id]);
+            const aud = wp.target_audience || 'all';
+            const audBadge = getAudienceBadge(aud);
 
             return (
               <article key={wp.id} className="glass-panel wallpaper-card">
@@ -797,10 +875,15 @@ export function WallpapersTab({
                   <div className="wallpaper-overlay-top">
                     <div className="wallpaper-overlay-badges">
                       <span className="wallpaper-media-pill">{typeLabel(wp.wallpaper_type)}</span>
+                      {aud !== 'all' && (
+                        <span className={`badge ${audBadge.className}`}>
+                          {audBadge.label}
+                        </span>
+                      )}
                       {wp.is_pro && (
                         <span
                           className="wallpaper-media-pill"
-                          style={{ color: 'var(--gold)', borderColor: 'var(--gold-border)' }}
+                          style={{ color: 'var(--amber)', borderColor: 'var(--amber-border)' }}
                         >
                           <Crown size={12} /> Pro
                         </span>
@@ -835,7 +918,7 @@ export function WallpapersTab({
 
                 <div className="wallpaper-body">
                   <div className="wallpaper-meta">
-                    <div>
+                    <div style={{ minWidth: 0 }}>
                       <h3 className="wallpaper-title">{wp.title_ar}</h3>
                       <p className="wallpaper-sub">
                         {categoryNameMap[wp.category_slug] || wp.category_slug || 'بدون قسم'}
@@ -845,12 +928,12 @@ export function WallpapersTab({
                     <button
                       type="button"
                       className="btn btn-danger btn-icon"
-                      style={{ width: 34, height: 34, flexShrink: 0 }}
+                      style={{ width: 32, height: 32, flexShrink: 0 }}
                       onClick={() => setDeleteTarget(wp)}
                       aria-label={`حذف ${wp.title_ar}`}
                       title="حذف الخلفية"
                     >
-                      <Trash2 size={15} />
+                      <Trash2 size={14} />
                     </button>
                   </div>
 
@@ -859,10 +942,10 @@ export function WallpapersTab({
                     <button
                       type="button"
                       disabled={isBusy}
-                      className={`quick-toggle-pill${wp.is_new ? ' active-sky' : ''}`}
+                      className={`quick-toggle-pill${wp.is_new ? ' active-indigo' : ''}`}
                       onClick={() => handleToggleFlag(wp, 'is_new')}
                     >
-                      <Sparkles size={13} /> جديد
+                      <Sparkles size={12} /> جديد
                     </button>
                     <button
                       type="button"
@@ -870,26 +953,60 @@ export function WallpapersTab({
                       className={`quick-toggle-pill${wp.is_exclusive ? ' active-emerald' : ''}`}
                       onClick={() => handleToggleFlag(wp, 'is_exclusive')}
                     >
-                      <Star size={13} /> حصرية
+                      <Star size={12} /> حصرية
                     </button>
                     <button
                       type="button"
                       disabled={isBusy}
-                      className={`quick-toggle-pill${wp.is_pro ? ' active-gold' : ''}`}
+                      className={`quick-toggle-pill${wp.is_pro ? ' active-amber' : ''}`}
                       onClick={() => handleToggleFlag(wp, 'is_pro')}
                     >
-                      <Crown size={13} /> Pro
+                      <Crown size={12} /> Pro
                     </button>
                     <button
                       type="button"
                       disabled={isBusy}
-                      className={`quick-toggle-pill${wp.is_active ? ' active-emerald' : ' active-danger'}`}
+                      className={`quick-toggle-pill${wp.is_active ? ' active-emerald' : ' active-rose'}`}
                       onClick={() => handleToggleFlag(wp, 'is_active')}
                     >
-                      {wp.is_active ? <Eye size={13} /> : <EyeOff size={13} />}
+                      {wp.is_active ? <Eye size={12} /> : <EyeOff size={12} />}
                       {wp.is_active ? 'ظاهرة' : 'مخفية'}
                     </button>
                   </div>
+
+                  {/* Audience inline selector */}
+                  <div className="audience-mini">
+                    {AUDIENCE_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        disabled={isBusy}
+                        className={`audience-mini-btn${aud === opt.value ? ` active-${opt.value}` : ''}`}
+                        onClick={() => handleChangeAudience(wp, opt.value)}
+                      >
+                        {opt.shortLabel}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Copy Deep Link Button */}
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm btn-block"
+                    onClick={() => copyDeepLink(wp.id)}
+                  >
+                    {copiedId === wp.id ? (
+                      <>
+                        <Check size={14} color="var(--emerald)" />
+                        تم نسخ رابط العمق المباشر
+                      </>
+                    ) : (
+                      <>
+                        <Link2 size={14} />
+                        نسخ رابط العمق المباشر
+                      </>
+                    )}
+                  </button>
 
                   <div className="wallpaper-footer">
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
@@ -900,7 +1017,7 @@ export function WallpapersTab({
                       href={wp.image_url}
                       target="_blank"
                       rel="noreferrer"
-                      style={{ color: 'var(--accent)', textDecoration: 'none', fontWeight: 600 }}
+                      style={{ color: 'var(--primary)', textDecoration: 'none', fontWeight: 600 }}
                     >
                       عرض الأصل ↗
                     </a>
@@ -939,7 +1056,7 @@ export function WallpapersTab({
             <form
               onSubmit={handleAddCategory}
               className="glass-subcard"
-              style={{ padding: 14, marginBottom: 18 }}
+              style={{ padding: 14, marginBottom: 16 }}
             >
               <div className="form-grid cols-2" style={{ marginBottom: 12 }}>
                 <div className="field">
@@ -1009,13 +1126,13 @@ export function WallpapersTab({
               </button>
             </form>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
               {categories.map((cat) => (
                 <div
                   key={cat.id}
                   className="glass-subcard"
                   style={{
-                    padding: '11px 14px',
+                    padding: '10px 13px',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
@@ -1024,10 +1141,10 @@ export function WallpapersTab({
                 >
                   <div>
                     <strong>{cat.name_ar}</strong>{' '}
-                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
+                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
                       ({cat.name_en})
                     </span>
-                    <div className="mono" style={{ fontSize: '0.73rem', color: 'var(--text-muted)' }}>
+                    <div className="mono" style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
                       {cat.slug} • ترتيب: {cat.sort_order}
                     </div>
                   </div>
@@ -1042,7 +1159,7 @@ export function WallpapersTab({
                     <button
                       type="button"
                       className="btn btn-danger btn-icon"
-                      style={{ width: 32, height: 32 }}
+                      style={{ width: 30, height: 30 }}
                       onClick={() => setDeleteCategoryTarget(cat)}
                       aria-label={`حذف قسم ${cat.name_ar}`}
                     >
@@ -1056,21 +1173,19 @@ export function WallpapersTab({
         </div>
       )}
 
-      {/* Delete Wallpaper Confirm */}
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         title="حذف الخلفية"
-        message={`هل أنت متأكد من حذف الخلفية "${deleteTarget?.title_ar || ''}"؟ سيتم حذف الصورة الأصلية والمصغّرة من التخزين السحابي نهائياً.`}
+        message={`هل أنت متأكد من حذف الخلفية "${deleteTarget?.title_ar || ''}"؟ سيتم حذف الصورة الأصلية والمصغّرة نهائياً.`}
         busy={deleting}
         onConfirm={confirmDeleteWallpaper}
         onCancel={() => setDeleteTarget(null)}
       />
 
-      {/* Delete Category Confirm */}
       <ConfirmDialog
         open={Boolean(deleteCategoryTarget)}
         title="حذف القسم"
-        message={`هل أنت متأكد من حذف القسم "${deleteCategoryTarget?.name_ar || ''}"؟ ستبقى الخلفيات المرتبطة به بدون قسم.`}
+        message={`هل أنت متأكد من حذف القسم "${deleteCategoryTarget?.name_ar || ''}"؟`}
         busy={deleting}
         onConfirm={confirmDeleteCategory}
         onCancel={() => setDeleteCategoryTarget(null)}

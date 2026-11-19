@@ -2,7 +2,7 @@ export function ToggleSwitch({
   checked,
   onChange,
   disabled = false,
-  tone = 'sky',
+  tone = 'indigo',
   ariaLabel,
 }) {
   return (

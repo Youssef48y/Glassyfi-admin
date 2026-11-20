@@ -30,8 +30,15 @@ import { formatFileSize } from '../lib/imageUtils';
 import { ToggleSwitch } from './ToggleSwitch';
 import { ConfirmDialog } from './ConfirmDialog';
 
-const GITHUB_LATEST_RELEASE_URL =
-  'https://api.github.com/repos/Youssef48y/Glassyfi/releases/latest';
+const GITHUB_RELEASES_URL =
+  'https://api.github.com/repos/Youssef48y/glassyfi-apk/releases?per_page=10';
+
+function parseVersionCode(body) {
+  const match = String(body || '').match(/Version Code:\s*(\d+)/i);
+  if (!match) return null;
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
 
 const DEFAULT_CONFIG = {
   latest_version_code: 1,
@@ -122,7 +129,7 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
   async function handleFetchLatestGithubRelease() {
     setFetchingRelease(true);
     try {
-      const res = await fetch(GITHUB_LATEST_RELEASE_URL, {
+      const res = await fetch(GITHUB_RELEASES_URL, {
         headers: { Accept: 'application/vnd.github+json' },
       });
 
@@ -134,21 +141,48 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
         throw new Error(`GitHub API HTTP ${res.status}`);
       }
 
-      const release = await res.json();
-      const assets = Array.isArray(release.assets) ? release.assets : [];
+      const releases = await res.json();
+      if (!Array.isArray(releases) || releases.length === 0) {
+        notify('لا يوجد إصدار منشور (Release) على GitHub حتى الآن', 'error');
+        return;
+      }
+
+      const latest = releases[0];
+      const previous = releases[1] || null;
+
+      const rawTag = String(latest.tag_name || '').trim();
+      const cleanedVersion = rawTag.replace(/^v/i, '').trim() || form.latest_version_name || '1.0.0';
+
+      const parsedLatestCode = parseVersionCode(latest.body);
+      const newLatestCode =
+        parsedLatestCode ??
+        Math.max(Number(form.latest_version_code || 0) + 1, releases.length + 1);
+
+      const minSupportedCode = previous
+        ? (parseVersionCode(previous.body) ?? Math.max(1, newLatestCode - 1))
+        : 1;
+
+      const assets = Array.isArray(latest.assets) ? latest.assets : [];
       const apkAsset = assets.find((a) =>
         String(a?.name || '').toLowerCase().endsWith('.apk'),
       );
 
-      const rawTag = String(release.tag_name || '').trim();
-      const cleanedVersion = rawTag.replace(/^v/i, '').trim();
+      const summaryLine = `تم الجلب: الإصدار الحالي v${cleanedVersion} (كود ${newLatestCode}) — الإصدار السابق (كود ${minSupportedCode})`;
 
       if (!apkAsset?.browser_download_url) {
-        if (cleanedVersion) {
-          setForm((p) => ({ ...p, latest_version_name: cleanedVersion }));
-        }
+        setForm((p) => ({
+          ...p,
+          latest_version_name: cleanedVersion,
+          latest_version_code: newLatestCode,
+          min_supported_version_code: minSupportedCode,
+        }));
+        setFetchedReleaseInfo({
+          summaryLine,
+          name: null,
+          size: null,
+        });
         notify(
-          `تم العثور على الإصدار ${rawTag || 'الأحدث'} لكن لا يوجد ملف .apk مرفق به`,
+          `${summaryLine} — لكن لا يوجد ملف .apk مرفق بهذا الإصدار`,
           'error',
         );
         return;
@@ -158,19 +192,17 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
       setForm((p) => ({
         ...p,
         update_url: apkAsset.browser_download_url,
-        latest_version_name: cleanedVersion || p.latest_version_name,
+        latest_version_name: cleanedVersion,
+        latest_version_code: newLatestCode,
+        min_supported_version_code: minSupportedCode,
       }));
       setFetchedReleaseInfo({
-        tag: rawTag,
-        version: cleanedVersion,
+        summaryLine,
         name: apkAsset.name,
         size: sizeText,
       });
 
-      notify(
-        `تم جلب الإصدار ${cleanedVersion || rawTag}: ${apkAsset.name} (${sizeText})`,
-        'success',
-      );
+      notify(summaryLine, 'success');
     } catch (err) {
       notify(`تعذر جلب آخر إصدار من GitHub: ${err.message}`, 'error');
     } finally {
@@ -451,18 +483,7 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
               </div>
             </div>
 
-            {fetchedReleaseInfo && (
-              <div className="alert-banner alert-emerald" style={{ marginBottom: 14 }}>
-                <DownloadCloud size={16} style={{ flexShrink: 0, marginTop: 2 }} />
-                <span>
-                  تم الجلب من GitHub ({fetchedReleaseInfo.tag}):{' '}
-                  <strong className="mono">{fetchedReleaseInfo.name}</strong> • الحجم:{' '}
-                  <strong className="mono">{fetchedReleaseInfo.size}</strong>
-                </span>
-              </div>
-            )}
-
-            <div className="form-grid cols-3" style={{ marginBottom: 15 }}>
+            <div className="form-grid cols-3" style={{ marginBottom: fetchedReleaseInfo ? 10 : 15 }}>
               <div className="field">
                 <label className="field-label" htmlFor="cfg-vcode">
                   أحدث رقم إصدار (Version Code)
@@ -516,6 +537,21 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
                 />
               </div>
             </div>
+
+            {fetchedReleaseInfo && (
+              <div className="alert-banner alert-emerald" style={{ marginBottom: 15 }}>
+                <DownloadCloud size={16} style={{ flexShrink: 0, marginTop: 2 }} />
+                <div>
+                  <div style={{ fontWeight: 600 }}>{fetchedReleaseInfo.summaryLine}</div>
+                  {fetchedReleaseInfo.name && (
+                    <div style={{ fontSize: '0.76rem', opacity: 0.9, marginTop: 2 }}>
+                      الملف: <strong className="mono">{fetchedReleaseInfo.name}</strong> • الحجم:{' '}
+                      <strong className="mono">{fetchedReleaseInfo.size}</strong>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             <div className="field" style={{ marginBottom: 15 }}>
               <label className="field-label" htmlFor="cfg-url">

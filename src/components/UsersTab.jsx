@@ -96,6 +96,8 @@ export function UsersTab({
   const [promoSaving, setPromoSaving] = useState(false);
   const [deletePromoTarget, setDeletePromoTarget] = useState(null);
   const [deletingPromo, setDeletingPromo] = useState(false);
+  const [deleteUserTarget, setDeleteUserTarget] = useState(null);
+  const [deletingUser, setDeletingUser] = useState(false);
 
   const latestVersionCode = Number(appConfig?.latest_version_code ?? 1);
 
@@ -527,6 +529,28 @@ export function UsersTab({
     }
   }
 
+  async function confirmDeleteUser() {
+    if (!deleteUserTarget) return;
+    setDeletingUser(true);
+    try {
+      const { error } = await supabase
+        .from('app_users')
+        .delete()
+        .eq('device_id', deleteUserTarget.device_id);
+      if (error) throw error;
+      notify(`تم حذف الجهاز ${deleteUserTarget.user_code} نهائياً`, 'success');
+      if (selectedDeviceId === deleteUserTarget.device_id) {
+        setSelectedDeviceId(null);
+      }
+      setDeleteUserTarget(null);
+      await onRefresh();
+    } catch (err) {
+      notify(`تعذر حذف الجهاز: ${err.message}`, 'error');
+    } finally {
+      setDeletingUser(false);
+    }
+  }
+
   const FILTER_PILLS = [
     { id: 'all', label: 'الكل', count: filterCounts.all },
     { id: 'starred', label: 'المميزين ★', count: filterCounts.starred },
@@ -751,6 +775,16 @@ export function UsersTab({
                         <MessageSquareMore size={14} />
                         رسالة منبثقة لهذا الشخص
                       </button>
+                      <button
+                        type="button"
+                        className="btn btn-danger btn-sm"
+                        onClick={() => setDeleteUserTarget(user)}
+                        title="حذف الجهاز نهائياً"
+                        aria-label={`حذف الجهاز ${user.user_code}`}
+                      >
+                        <Trash2 size={14} />
+                        حذف الجهاز
+                      </button>
                     </div>
                   </article>
                 );
@@ -778,7 +812,7 @@ export function UsersTab({
                   <input
                     id="promo-code"
                     className="input mono"
-                    placeholder="GLASSY30"
+                    placeholder="VITRIFY30"
                     value={promoCodeInput}
                     onChange={(e) => setPromoCodeInput(e.target.value.toUpperCase())}
                     required
@@ -786,7 +820,7 @@ export function UsersTab({
                   <button
                     type="button"
                     className="btn btn-secondary btn-icon"
-                    onClick={() => setPromoCodeInput(generateRandomPromoCode('GLASSY'))}
+                    onClick={() => setPromoCodeInput(generateRandomPromoCode('VITRIFY'))}
                     title="توليد كود عشوائي"
                     aria-label="توليد كود عشوائي"
                   >
@@ -1242,6 +1276,17 @@ export function UsersTab({
                   </>
                 )}
               </button>
+
+              <button
+                type="button"
+                className="btn btn-danger btn-sm btn-block"
+                style={{ marginTop: 8 }}
+                disabled={drawerBusy}
+                onClick={() => setDeleteUserTarget(selectedUser)}
+              >
+                <Trash2 size={15} />
+                حذف الجهاز من قاعدة البيانات
+              </button>
             </div>
           </aside>
         </div>
@@ -1358,6 +1403,16 @@ export function UsersTab({
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={Boolean(deleteUserTarget)}
+        title="حذف الجهاز"
+        message={`هل أنت متأكد من حذف الجهاز "${deleteUserTarget?.user_code || ''}" (${deleteUserTarget?.device_model || 'جهاز غير معروف'}) نهائياً من قاعدة البيانات؟`}
+        confirmText="حذف الجهاز"
+        busy={deletingUser}
+        onConfirm={confirmDeleteUser}
+        onCancel={() => setDeleteUserTarget(null)}
+      />
 
       <ConfirmDialog
         open={Boolean(deletePromoTarget)}

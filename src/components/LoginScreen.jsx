@@ -43,7 +43,7 @@ export function LoginScreen({ onAuthenticated, initialError = '' }) {
       const { isAdmin, record } = await verifyAdminAccess(data.session.user.id);
       if (!isAdmin) {
         await supabase.auth.signOut();
-        setError('هذا الحساب غير مخوّل للوصول إلى لوحة تحكم Glassyfi الإدارية.');
+        setError('هذا الحساب غير مخوّل للوصول إلى لوحة تحكم Vitrify الإدارية.');
         return;
       }
 
@@ -62,7 +62,7 @@ export function LoginScreen({ onAuthenticated, initialError = '' }) {
           <div className="brand-icon">
             <Sparkles size={26} />
           </div>
-          <h1>Glassyfi Admin</h1>
+          <h1>لوحة تحكم Vitrify</h1>
           <p>لوحة التحكم السحابية لإدارة التطبيق والخلفيات</p>
         </div>
 
@@ -86,7 +86,7 @@ export function LoginScreen({ onAuthenticated, initialError = '' }) {
                 id="admin-email"
                 type="email"
                 className="input ltr"
-                placeholder="admin@glassyfi.app"
+                placeholder="admin@vitrify.app"
                 autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}

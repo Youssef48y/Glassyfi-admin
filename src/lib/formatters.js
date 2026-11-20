@@ -43,7 +43,7 @@ export function slugifyCategory(input) {
     .replace(/^-+|-+$/g, '');
 }
 
-export function generateRandomPromoCode(prefix = 'GLASSY') {
+export function generateRandomPromoCode(prefix = 'VITRIFY') {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let suffix = '';
   for (let i = 0; i < 6; i += 1) {

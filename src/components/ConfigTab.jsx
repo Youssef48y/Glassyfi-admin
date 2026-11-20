@@ -42,10 +42,10 @@ const DEFAULT_CONFIG = {
   whatsapp_visible: true,
   telegram_url: '',
   telegram_visible: true,
-  terms_ar: 'مرحباً بك في Glassyfi...',
+  terms_ar: 'مرحباً بك في Vitrify...',
   terms_updated_at: null,
   welcome_enabled: true,
-  welcome_title_ar: 'مرحباً بك في Glassyfi ✨',
+  welcome_title_ar: 'مرحباً بك في Vitrify ✨',
   welcome_body_ar: 'استمتع بأجمل خلفيات العمق الحية والويدجيت الزجاجية المصممة خصيصاً لهاتفك.',
   welcome_image_url: '',
   welcome_cta_text: 'ابدأ الاستكشاف',
@@ -76,7 +76,7 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
 
   useEffect(() => {
     if (config) {
-      const termsVal = config.terms_ar ?? 'مرحباً بك في Glassyfi...';
+      const termsVal = config.terms_ar ?? 'مرحباً بك في Vitrify...';
       setInitialTerms(termsVal);
       setForm({
         latest_version_code: config.latest_version_code ?? 1,
@@ -96,7 +96,7 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
         terms_ar: termsVal,
         terms_updated_at: config.terms_updated_at ?? null,
         welcome_enabled: config.welcome_enabled ?? true,
-        welcome_title_ar: config.welcome_title_ar ?? 'مرحباً بك في Glassyfi ✨',
+        welcome_title_ar: config.welcome_title_ar ?? 'مرحباً بك في Vitrify ✨',
         welcome_body_ar:
           config.welcome_body_ar ??
           'استمتع بأجمل خلفيات العمق الحية والويدجيت الزجاجية المصممة خصيصاً لهاتفك.',
@@ -405,7 +405,7 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
                 id="cfg-url"
                 type="url"
                 className="input ltr"
-                placeholder="https://github.com/.../releases/download/v1.0.0/Glassyfi.apk"
+                placeholder="https://github.com/.../releases/download/v1.0.0/Vitrify.apk"
                 value={form.update_url}
                 onChange={(e) => setForm((p) => ({ ...p, update_url: e.target.value }))}
               />
@@ -546,7 +546,7 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
                 <input
                   type="url"
                   className="input ltr"
-                  placeholder="https://instagram.com/glassyfi"
+                  placeholder="https://instagram.com/vitrify"
                   value={form.instagram_url}
                   onChange={(e) => setForm((p) => ({ ...p, instagram_url: e.target.value }))}
                 />
@@ -590,7 +590,7 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
                 <input
                   type="url"
                   className="input ltr"
-                  placeholder="https://t.me/glassyfi"
+                  placeholder="https://t.me/vitrify"
                   value={form.telegram_url}
                   onChange={(e) => setForm((p) => ({ ...p, telegram_url: e.target.value }))}
                 />

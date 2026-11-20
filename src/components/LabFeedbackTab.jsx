@@ -85,8 +85,8 @@ export function LabFeedbackTab({
           body: {
             fcm_token: fcmToken,
             target_label: app.user_code || app.full_name,
-            title: 'تمت الموافقة على تسجيلك في مختبر Glassyfi 🧪',
-            body: `أهلاً بك يا ${app.full_name}! تم تفعيل عضويتك في مختبر Glassyfi ويمكنك الآن تجربة المزايا الجديدة قبل الجميع.`,
+            title: 'تمت الموافقة على تسجيلك في مختبر Vitrify 🧪',
+            body: `أهلاً بك يا ${app.full_name}! تم تفعيل عضويتك في مختبر Vitrify ويمكنك الآن تجربة المزايا الجديدة قبل الجميع.`,
             deep_link: 'glassyfi://lab',
             also_silent_sync: true,
           },
@@ -239,7 +239,7 @@ export function LabFeedbackTab({
       <div className="page-header">
         <div className="page-title-group">
           <h1>المختبر والبلاغات</h1>
-          <p>مراجعة طلبات الانضمام لمختبر Glassyfi، وبلاغات الأخطاء واقتراحات المستخدمين</p>
+          <p>مراجعة طلبات الانضمام لمختبر Vitrify، وبلاغات الأخطاء واقتراحات المستخدمين</p>
         </div>
 
         <div className="segmented">

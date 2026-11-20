@@ -60,7 +60,7 @@ function buildJsonTemplate(aspectRatio = '2x2') {
       align: 'start',
       layout: 'column',
       elements: [
-        { type: 'badge', text: 'GLASSYFI LIVE', bg: 'rgba(255,255,255,0.14)', color: '#FFFFFF' },
+        { type: 'badge', text: 'VITRIFY LIVE', bg: 'rgba(255,255,255,0.14)', color: '#FFFFFF' },
         { type: 'clock', format: 'hh:mm a', fontSize: 34, weight: 'bold', color: '#FFFFFF' },
         { type: 'date', format: 'EEEE • d MMMM', fontSize: 13, color: '#A9AFB9' },
         { type: 'text', text: 'يومك سعيد ومليء بالإنجاز ✨', fontSize: 12, color: '#D1D5DB' },

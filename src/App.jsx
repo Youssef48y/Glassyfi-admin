@@ -445,7 +445,7 @@ export default function App() {
             setAuthError('');
             setSession(nextSession);
             setAdminRecord(record);
-            notify('أهلاً بك في لوحة تحكم Glassyfi المباشرة', 'success');
+            notify('أهلاً بك في لوحة تحكم Vitrify المباشرة', 'success');
           }}
         />
       </>
@@ -467,7 +467,7 @@ export default function App() {
           </div>
           <div>
             <div className="brand-title" style={{ fontSize: '0.95rem' }}>
-              Glassyfi Admin
+              لوحة تحكم Vitrify
             </div>
             <div className="brand-subtitle">{currentTabMeta.label}</div>
           </div>
@@ -509,8 +509,8 @@ export default function App() {
               <Sparkles size={20} />
             </div>
             <div>
-              <div className="brand-title">Glassyfi</div>
-              <div className="brand-subtitle">لوحة التحكم v1.0</div>
+              <div className="brand-title">Vitrify</div>
+              <div className="brand-subtitle">لوحة تحكم Vitrify</div>
             </div>
           </div>
         </div>

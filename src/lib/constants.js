@@ -28,7 +28,7 @@ export const DEEP_LINK_PRESETS = [
   { value: 'glassyfi://depth', label: 'استوديو العمق — glassyfi://depth' },
   { value: 'glassyfi://settings', label: 'الإعدادات — glassyfi://settings' },
   { value: 'glassyfi://pro', label: 'شاشة الاشتراك Pro — glassyfi://pro' },
-  { value: 'glassyfi://lab', label: 'مختبر Glassyfi — glassyfi://lab' },
+  { value: 'glassyfi://lab', label: 'مختبر Vitrify — glassyfi://lab' },
   { value: '__custom__', label: 'رابط مخصص (خلفية محددة أو رابط خارجي)' },
 ];
 
@@ -69,7 +69,7 @@ export const SCREEN_LABELS_AR = {
   editor: 'محرر العمق',
   settings: 'الإعدادات',
   pro: 'شاشة Pro',
-  lab: 'مختبر Glassyfi',
+  lab: 'مختبر Vitrify',
   favorites: 'المفضلة',
   search: 'البحث',
 };

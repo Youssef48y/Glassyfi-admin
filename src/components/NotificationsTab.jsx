@@ -358,7 +358,7 @@ export function NotificationsTab({
                 <div className="push-preview-head">
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 600 }}>
                     <Bell size={13} />
-                    Glassyfi
+                    Vitrify
                   </span>
                   <span>الآن</span>
                 </div>
@@ -504,7 +504,7 @@ export function NotificationsTab({
                 <input
                   id="pop-title"
                   className="input"
-                  placeholder="عرض خاص لمستخدمي Glassyfi"
+                  placeholder="عرض خاص لمستخدمي Vitrify"
                   value={popupTitle}
                   onChange={(e) => setPopupTitle(e.target.value)}
                   required

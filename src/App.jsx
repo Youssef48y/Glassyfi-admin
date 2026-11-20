@@ -53,7 +53,7 @@ const NAV_GROUPS = [
     label: 'التواصل والنظام',
     items: [
       { id: 'notifications', label: 'الإشعارات والمنبثقة', shortLabel: 'الإشعارات', icon: Bell },
-      { id: 'config', label: 'التحديث والصيانة', shortLabel: 'التحديث', icon: SlidersHorizontal },
+      { id: 'config', label: 'الإعدادات والدعم والـ FAQ', shortLabel: 'الإعدادات', icon: SlidersHorizontal },
     ],
   },
 ];
@@ -71,6 +71,8 @@ const REALTIME_TABLES = [
   'wallpapers',
   'widgets_config',
   'depth_tools_config',
+  'dynamic_widgets',
+  'faq_items',
   'popup_announcements',
   'app_config',
   'promo_codes',
@@ -87,12 +89,14 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [dataLoading, setDataLoading] = useState(false);
-  const [realtimeStatus, setRealtimeStatus] = useState('connecting'); // 'connecting' | 'live'
+  const [realtimeStatus, setRealtimeStatus] = useState('connecting');
 
   const [categories, setCategories] = useState([]);
   const [wallpapers, setWallpapers] = useState([]);
   const [widgets, setWidgets] = useState([]);
   const [depthTools, setDepthTools] = useState([]);
+  const [dynamicWidgets, setDynamicWidgets] = useState([]);
+  const [faqItems, setFaqItems] = useState([]);
   const [users, setUsers] = useState([]);
   const [promoCodes, setPromoCodes] = useState([]);
   const [pushHistory, setPushHistory] = useState([]);
@@ -118,7 +122,6 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // Targeted per-table refresh for instant zero-flicker Realtime updates
   const refreshTable = useCallback(async (tableName) => {
     try {
       switch (tableName) {
@@ -155,6 +158,24 @@ export default function App() {
             .select('*')
             .order('sort_order', { ascending: true });
           if (data) setDepthTools(data);
+          break;
+        }
+        case 'dynamic_widgets': {
+          const { data } = await supabase
+            .from('dynamic_widgets')
+            .select('*')
+            .order('sort_order', { ascending: true })
+            .order('created_at', { ascending: false });
+          if (data) setDynamicWidgets(data);
+          break;
+        }
+        case 'faq_items': {
+          const { data } = await supabase
+            .from('faq_items')
+            .select('*')
+            .order('sort_order', { ascending: true })
+            .order('created_at', { ascending: true });
+          if (data) setFaqItems(data);
           break;
         }
         case 'app_users': {
@@ -241,7 +262,7 @@ export default function App() {
           break;
       }
     } catch {
-      // Non-fatal realtime refresh glitch; next event or manual refresh will catch up
+      // Non-fatal realtime refresh glitch
     }
   }, []);
 
@@ -268,7 +289,6 @@ export default function App() {
     }
   }, [notify, refreshTable]);
 
-  // Restore session & enforce admin_users check
   useEffect(() => {
     let active = true;
 
@@ -317,14 +337,13 @@ export default function App() {
     };
   }, []);
 
-  // Load initial data + establish live Supabase Realtime postgres_changes subscription
   useEffect(() => {
     if (!session || !adminRecord) return undefined;
 
     fetchAllData();
     setRealtimeStatus('connecting');
 
-    let channel = supabase.channel('glassyfi-admin-live-v3');
+    let channel = supabase.channel('glassyfi-admin-live-v4');
     REALTIME_TABLES.forEach((table) => {
       channel = channel.on(
         'postgres_changes',
@@ -359,6 +378,8 @@ export default function App() {
     setWallpapers([]);
     setWidgets([]);
     setDepthTools([]);
+    setDynamicWidgets([]);
+    setFaqItems([]);
     setUsers([]);
     setPromoCodes([]);
     setPushHistory([]);
@@ -378,7 +399,9 @@ export default function App() {
 
   function getTabBadge(tabId) {
     if (tabId === 'wallpapers') return { value: wallpapers.length, alert: false };
-    if (tabId === 'widgets') return { value: widgets.length + depthTools.length, alert: false };
+    if (tabId === 'widgets') {
+      return { value: widgets.length + depthTools.length + dynamicWidgets.length, alert: false };
+    }
     if (tabId === 'users') return { value: users.length, alert: false };
     if (tabId === 'lab_feedback') {
       const total = pendingLabCount + newFeedbackCount;
@@ -422,7 +445,7 @@ export default function App() {
             setAuthError('');
             setSession(nextSession);
             setAdminRecord(record);
-            notify('أهلاً بك في لوحة تحكم Glassyfi v3 المباشرة', 'success');
+            notify('أهلاً بك في لوحة تحكم Glassyfi المباشرة', 'success');
           }}
         />
       </>
@@ -436,7 +459,7 @@ export default function App() {
     <div className="app-shell">
       <ToastList toasts={toasts} onDismiss={dismissToast} />
 
-      {/* Mobile Sticky Header with Live Pulsing Badge */}
+      {/* Mobile Sticky Header */}
       <header className="mobile-topbar">
         <div className="brand-mark">
           <div className="brand-icon" style={{ width: 35, height: 35, borderRadius: 10 }}>
@@ -487,7 +510,7 @@ export default function App() {
             </div>
             <div>
               <div className="brand-title">Glassyfi</div>
-              <div className="brand-subtitle">لوحة التحكم v3</div>
+              <div className="brand-subtitle">لوحة التحكم v1.0</div>
             </div>
           </div>
         </div>
@@ -598,6 +621,7 @@ export default function App() {
           <WidgetsTab
             widgets={widgets}
             depthTools={depthTools}
+            dynamicWidgets={dynamicWidgets}
             loading={dataLoading}
             onRefresh={fetchAllData}
             notify={notify}
@@ -607,7 +631,7 @@ export default function App() {
           <UsersTab
             users={users}
             promoCodes={promoCodes}
-            widgets={widgets}
+            widgets={[...widgets, ...dynamicWidgets]}
             depthTools={depthTools}
             appConfig={appConfig}
             loading={dataLoading}
@@ -644,6 +668,7 @@ export default function App() {
         {activeTab === 'config' && (
           <ConfigTab
             config={appConfig}
+            faqItems={faqItems}
             loading={dataLoading}
             onRefresh={fetchAllData}
             notify={notify}
@@ -680,7 +705,7 @@ export default function App() {
         </button>
       </nav>
 
-      {/* Mobile Bottom Sheet for Remaining 4 Tabs */}
+      {/* Mobile Bottom Sheet */}
       {mobileMenuOpen && (
         <div className="sheet-backdrop" onClick={() => setMobileMenuOpen(false)}>
           <div

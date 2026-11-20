@@ -20,6 +20,7 @@ import {
   Check,
   Link2,
   HardDrive,
+  RotateCcw,
 } from 'lucide-react';
 import { supabase, triggerSilentSync, WALLPAPERS_BUCKET } from '../lib/supabase';
 import {
@@ -69,9 +70,9 @@ export function WallpapersTab({
   const [showAddForm, setShowAddForm] = useState(false);
   const [showCategoriesModal, setShowCategoriesModal] = useState(false);
 
-  // Filters
+  // Filters: primary pills ('all' | 'builtin' | 'cloud' | 'hidden' | 'pro')
+  const [primaryFilter, setPrimaryFilter] = useState('all');
   const [selectedCategory, setSelectedCategory] = useState('all');
-  const [selectedType, setSelectedType] = useState('all');
   const [selectedAudience, setSelectedAudience] = useState('all_filter');
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -120,18 +121,29 @@ export function WallpapersTab({
     return map;
   }, [categories]);
 
+  const counts = useMemo(() => {
+    let builtin = 0;
+    let cloud = 0;
+    let hidden = 0;
+    let pro = 0;
+    wallpapers.forEach((w) => {
+      if (w.is_builtin) builtin += 1;
+      else cloud += 1;
+      if (!w.is_active) hidden += 1;
+      if (w.is_pro) pro += 1;
+    });
+    return { all: wallpapers.length, builtin, cloud, hidden, pro };
+  }, [wallpapers]);
+
   const filteredWallpapers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return wallpapers.filter((item) => {
+      if (primaryFilter === 'builtin' && !item.is_builtin) return false;
+      if (primaryFilter === 'cloud' && item.is_builtin) return false;
+      if (primaryFilter === 'hidden' && item.is_active) return false;
+      if (primaryFilter === 'pro' && !item.is_pro) return false;
+
       if (selectedCategory !== 'all' && item.category_slug !== selectedCategory) {
-        return false;
-      }
-      if (selectedType === 'builtin' && !item.is_builtin) return false;
-      if (
-        selectedType !== 'all' &&
-        selectedType !== 'builtin' &&
-        item.wallpaper_type !== selectedType
-      ) {
         return false;
       }
       if (selectedAudience !== 'all_filter' && (item.target_audience || 'all') !== selectedAudience) {
@@ -145,7 +157,7 @@ export function WallpapersTab({
       }
       return true;
     });
-  }, [wallpapers, selectedCategory, selectedType, selectedAudience, searchQuery]);
+  }, [wallpapers, primaryFilter, selectedCategory, selectedAudience, searchQuery]);
 
   async function copyDeepLink(wp) {
     const keyOrId = wp.is_builtin && wp.builtin_asset_key ? wp.builtin_asset_key : wp.id;
@@ -349,32 +361,45 @@ export function WallpapersTab({
     }
   }
 
-  async function confirmDeleteWallpaper() {
-    if (!deleteTarget || deleteTarget.is_builtin) return;
+  async function confirmDeleteOrHideWallpaper() {
+    if (!deleteTarget) return;
     setDeleting(true);
     try {
-      const { error } = await supabase
-        .from('wallpapers')
-        .delete()
-        .eq('id', deleteTarget.id);
-      if (error) throw error;
+      if (deleteTarget.is_builtin) {
+        // Built-in wallpaper: cleanly hide (is_active = false) so it vanishes from the app immediately and can be restored from "مخفية"
+        const { error } = await supabase
+          .from('wallpapers')
+          .update({ is_active: false })
+          .eq('id', deleteTarget.id);
+        if (error) throw error;
 
-      const paths = [
-        extractStoragePath(deleteTarget.image_url),
-        extractStoragePath(deleteTarget.night_image_url),
-        extractStoragePath(deleteTarget.thumbnail_url),
-      ].filter(Boolean);
+        triggerSilentSync({ topic: 'all_users' });
+        notify(`تم إخفاء الخلفية المدمجة "${deleteTarget.title_ar}" من التطبيق فوراً (يمكنك استعادتها من فلتر المخفية)`, 'info');
+      } else {
+        const { error } = await supabase
+          .from('wallpapers')
+          .delete()
+          .eq('id', deleteTarget.id);
+        if (error) throw error;
 
-      if (paths.length > 0) {
-        await supabase.storage.from(WALLPAPERS_BUCKET).remove(paths);
+        const paths = [
+          extractStoragePath(deleteTarget.image_url),
+          extractStoragePath(deleteTarget.night_image_url),
+          extractStoragePath(deleteTarget.thumbnail_url),
+        ].filter(Boolean);
+
+        if (paths.length > 0) {
+          await supabase.storage.from(WALLPAPERS_BUCKET).remove(paths);
+        }
+
+        triggerSilentSync({ topic: 'all_users' });
+        notify('تم حذف الخلفية السحابية وملفاتها بنجاح', 'success');
       }
 
-      triggerSilentSync({ topic: 'all_users' });
-      notify('تم حذف الخلفية وملفاتها بنجاح', 'success');
       setDeleteTarget(null);
       await onRefresh();
     } catch (err) {
-      notify(`فشل حذف الخلفية: ${err.message}`, 'error');
+      notify(`فشل التنفيذ: ${err.message}`, 'error');
     } finally {
       setDeleting(false);
     }
@@ -455,14 +480,20 @@ export function WallpapersTab({
     return 'عمق Depth';
   }
 
-  const builtinCount = wallpapers.filter((w) => w.is_builtin).length;
+  const PRIMARY_PILLS = [
+    { id: 'all', label: 'الكل', count: counts.all },
+    { id: 'builtin', label: 'مدمجة', count: counts.builtin },
+    { id: 'cloud', label: 'سحابية', count: counts.cloud },
+    { id: 'hidden', label: 'مخفية', count: counts.hidden },
+    { id: 'pro', label: 'Pro', count: counts.pro },
+  ];
 
   return (
     <section>
       <div className="page-header">
         <div className="page-title-group">
           <h1>الخلفيات</h1>
-          <p>إدارة الخلفيات السحابية الأصلية والخلفيات المدمجة (أوفلاين) والتحكم بجمهورها فورياً</p>
+          <p>تحكم كامل بـ {counts.builtin} خلفية مدمجة (أوفلاين) والخلفيات السحابية الأصلية مع مزامنة فورية</p>
         </div>
 
         <div className="header-actions">
@@ -495,7 +526,7 @@ export function WallpapersTab({
           <h2 className="section-heading">
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
               <Upload size={18} />
-              رفع خلفية جديدة (Lossless Original)
+              رفع خلفية سحابية جديدة (Lossless Original)
             </span>
             <span className="badge badge-white">حتى 25MB • WebP Thumb تلقائي</span>
           </h2>
@@ -598,7 +629,6 @@ export function WallpapersTab({
             </div>
           </div>
 
-          {/* File Dropzones */}
           <div
             className={`form-grid ${form.wallpaper_type === 'dual_day_night' ? 'cols-2' : ''}`}
             style={{ marginBottom: 15 }}
@@ -627,9 +657,7 @@ export function WallpapersTab({
                   <>
                     <Upload size={25} />
                     <strong>اختر الصورة أو اسحبها هنا</strong>
-                    <span className="field-hint">
-                      JPG / PNG / WebP • ترفع بجودتها الأصلية 100%
-                    </span>
+                    <span className="field-hint">JPG / PNG / WebP • ترفع بجودتها الأصلية 100%</span>
                   </>
                 )}
               </label>
@@ -761,9 +789,9 @@ export function WallpapersTab({
         </form>
       )}
 
-      {/* Search & Filters */}
+      {/* Search & Filter Pills: الكل / مدمجة / سحابية / مخفية / Pro */}
       <div className="glass-panel section-card" style={{ padding: 14 }}>
-        <div className="form-grid cols-2" style={{ marginBottom: 12 }}>
+        <div className="form-grid cols-2" style={{ marginBottom: 12, alignItems: 'center' }}>
           <div className="input-with-icon">
             <span className="input-icon-right">
               <Search size={16} />
@@ -771,48 +799,24 @@ export function WallpapersTab({
             <input
               type="search"
               className="input"
-              placeholder="ابحث باسم الخلفية أو مفتاح الأصل المدمج..."
+              placeholder="ابحث باسم الخلفية أو مفتاح الأصل (مثل ios_liquid_chrome)..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
           </div>
 
-          <div className="segmented" style={{ justifySelf: 'start' }}>
-            <button
-              type="button"
-              className={`segmented-btn${selectedType === 'all' ? ' active' : ''}`}
-              onClick={() => setSelectedType('all')}
-            >
-              الكل ({wallpapers.length})
-            </button>
-            <button
-              type="button"
-              className={`segmented-btn${selectedType === 'builtin' ? ' active' : ''}`}
-              onClick={() => setSelectedType('builtin')}
-            >
-              مدمجة ({builtinCount})
-            </button>
-            <button
-              type="button"
-              className={`segmented-btn${selectedType === 'depth' ? ' active' : ''}`}
-              onClick={() => setSelectedType('depth')}
-            >
-              عمق
-            </button>
-            <button
-              type="button"
-              className={`segmented-btn${selectedType === 'dual_day_night' ? ' active' : ''}`}
-              onClick={() => setSelectedType('dual_day_night')}
-            >
-              نهار وليل
-            </button>
-            <button
-              type="button"
-              className={`segmented-btn${selectedType === 'standard' ? ' active' : ''}`}
-              onClick={() => setSelectedType('standard')}
-            >
-              عادية
-            </button>
+          <div className="filter-strip" style={{ marginBottom: 0 }}>
+            {PRIMARY_PILLS.map((pill) => (
+              <button
+                key={pill.id}
+                type="button"
+                className={`chip${primaryFilter === pill.id ? ' active' : ''}`}
+                onClick={() => setPrimaryFilter(pill.id)}
+              >
+                {pill.label}
+                <span className="chip-count">({pill.count})</span>
+              </button>
+            ))}
           </div>
         </div>
 
@@ -868,7 +872,7 @@ export function WallpapersTab({
           <div className="empty-icon">
             <ImageIcon size={24} />
           </div>
-          <strong>لا توجد خلفيات مطابقة حالياً</strong>
+          <strong>لا توجد خلفيات مطابقة لهذا الفلتر</strong>
         </div>
       ) : (
         <div className="wallpapers-grid">
@@ -913,7 +917,7 @@ export function WallpapersTab({
                       <span className="wallpaper-media-pill">{typeLabel(wp.wallpaper_type)}</span>
                       {wp.is_builtin && (
                         <span className="badge badge-sky">
-                          <HardDrive size={11} /> مدمجة (أوفلاين)
+                          <HardDrive size={11} /> مدمجة
                         </span>
                       )}
                       {aud !== 'all' && (
@@ -951,7 +955,7 @@ export function WallpapersTab({
                   {!wp.is_active && (
                     <div className="wallpaper-hidden-veil">
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                        <EyeOff size={16} /> مخفية عن المستخدمين
+                        <EyeOff size={16} /> مخفية عن التطبيق
                       </span>
                     </div>
                   )}
@@ -966,21 +970,34 @@ export function WallpapersTab({
                         {wp.title_en ? ` • ${wp.title_en}` : ''}
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      className="btn btn-danger btn-icon"
-                      style={{ width: 32, height: 32, flexShrink: 0 }}
-                      disabled={Boolean(wp.is_builtin)}
-                      onClick={() => !wp.is_builtin && setDeleteTarget(wp)}
-                      aria-label={`حذف ${wp.title_ar}`}
-                      title={
-                        wp.is_builtin
-                          ? 'خلفية مدمجة داخل التطبيق — يمكنك إخفاؤها ولا يمكن حذفها'
-                          : 'حذف الخلفية'
-                      }
-                    >
-                      <Trash2 size={14} />
-                    </button>
+
+                    {wp.is_builtin && !wp.is_active ? (
+                      <button
+                        type="button"
+                        className="btn btn-emerald btn-sm"
+                        disabled={isBusy}
+                        onClick={() => handleToggleFlag(wp, 'is_active')}
+                        title="استعادة الخلفية وإظهارها مجدداً"
+                      >
+                        <RotateCcw size={13} /> استعادة
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn btn-danger btn-icon"
+                        style={{ width: 32, height: 32, flexShrink: 0 }}
+                        disabled={isBusy}
+                        onClick={() => setDeleteTarget(wp)}
+                        aria-label={wp.is_builtin ? `إخفاء ${wp.title_ar}` : `حذف ${wp.title_ar}`}
+                        title={
+                          wp.is_builtin
+                            ? 'إخفاء / إزالة من التطبيق (قابل للاستعادة من فلتر المخفية)'
+                            : 'حذف الخلفية نهائياً'
+                        }
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
                   </div>
 
                   {/* Quick toggles */}
@@ -1068,7 +1085,7 @@ export function WallpapersTab({
                         عرض الأصل ↗
                       </a>
                     ) : (
-                      <span style={{ color: 'var(--sky)', fontWeight: 600 }}>أصل محلي أوفلاين</span>
+                      <span style={{ color: 'var(--sky)', fontWeight: 600 }}>أصل مدمج أوفلاين</span>
                     )}
                   </div>
                 </div>
@@ -1224,10 +1241,15 @@ export function WallpapersTab({
 
       <ConfirmDialog
         open={Boolean(deleteTarget)}
-        title="حذف الخلفية"
-        message={`هل أنت متأكد من حذف الخلفية "${deleteTarget?.title_ar || ''}"؟ سيتم حذف الصورة الأصلية والمصغّرة نهائياً.`}
+        title={deleteTarget?.is_builtin ? 'إخفاء الخلفية المدمجة' : 'حذف الخلفية السحابية'}
+        message={
+          deleteTarget?.is_builtin
+            ? `سيتم إخفاء الخلفية المدمجة "${deleteTarget?.title_ar || ''}" فوراً من التطبيق عبر المزامنة الفورية، ويمكنك استعادتها في أي وقت من فلتر "مخفية".`
+            : `هل أنت متأكد من حذف الخلفية "${deleteTarget?.title_ar || ''}"؟ سيتم حذف الصورة الأصلية والمصغّرة نهائياً.`
+        }
+        confirmText={deleteTarget?.is_builtin ? 'إخفاء من التطبيق' : 'تأكيد الحذف'}
         busy={deleting}
-        onConfirm={confirmDeleteWallpaper}
+        onConfirm={confirmDeleteOrHideWallpaper}
         onCancel={() => setDeleteTarget(null)}
       />
 

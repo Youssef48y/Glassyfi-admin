@@ -26,7 +26,8 @@ import { triggerSilentSync } from '../lib/supabase';
 import { getProStatusInfo, formatRelativeTimeAr } from '../lib/formatters';
 import { getScreenLabelAr } from '../lib/constants';
 
-const CHART_COLORS = ['#818cf8', '#6366f1', '#34d399', '#38bdf8', '#fbbf24', '#f472b6', '#a78bfa'];
+// Crisp monochrome white/silver + calm semantic accents (Zero purple)
+const CHART_COLORS = ['#F5F6F8', '#D1D5DB', '#34D399', '#A9AFB9', '#FBBF24', '#7DD3FC', '#8B929E'];
 
 function ScreenTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
@@ -34,7 +35,7 @@ function ScreenTooltip({ active, payload, label }) {
   return (
     <div className="recharts-tooltip-glass">
       <div style={{ fontWeight: 700, marginBottom: 4 }}>{label}</div>
-      <div style={{ color: '#c7d2fe' }}>الزيارات: <strong className="mono">{row?.visits ?? 0}</strong></div>
+      <div style={{ color: '#f5f6f8' }}>الزيارات: <strong className="mono">{row?.visits ?? 0}</strong></div>
       <div style={{ color: '#34d399' }}>متوسط البقاء: <strong className="mono">{row?.avgDuration ?? 0}</strong> ثانية</div>
     </div>
   );
@@ -63,6 +64,7 @@ export function DashboardTab({
   userFeedback,
   labApplications,
   appConfig,
+  realtimeStatus,
   onNavigate,
   notify,
 }) {
@@ -91,7 +93,6 @@ export function DashboardTab({
     };
   }, [users, securityAlerts, userFeedback, labApplications]);
 
-  // Chart 1: Top screens where users spend time
   const screenData = useMemo(() => {
     const buckets = new Map();
     analyticsEvents.forEach((ev) => {
@@ -123,7 +124,6 @@ export function DashboardTab({
       .slice(0, 7);
   }, [analyticsEvents, screenMetric]);
 
-  // Map keys to Arabic labels for usage chart
   const itemLabelMap = useMemo(() => {
     const map = {};
     widgets.forEach((w) => {
@@ -134,11 +134,11 @@ export function DashboardTab({
     });
     wallpapers.forEach((wp) => {
       map[wp.id] = wp.title_ar;
+      if (wp.builtin_asset_key) map[wp.builtin_asset_key] = wp.title_ar;
     });
     return map;
   }, [widgets, depthTools, wallpapers]);
 
-  // Chart 2: Top wallpapers & widgets usage
   const usageData = useMemo(() => {
     if (usageMode === 'downloads') {
       return [...wallpapers]
@@ -191,12 +191,18 @@ export function DashboardTab({
     <section>
       <div className="page-header">
         <div className="page-title-group">
-          <h1>لوحة الإحصائيات</h1>
-          <p>نظرة شاملة وفورية على الأجهزة، استخدام الشاشات، الخلفيات والويدجيت والأمان</p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <h1>لوحة الإحصائيات</h1>
+            <span className={`live-pill${realtimeStatus === 'live' ? '' : ' connecting'}`}>
+              <span className="live-pulse-dot" />
+              {realtimeStatus === 'live' ? 'مباشر (Live)' : 'جاري الاتصال...'}
+            </span>
+          </div>
+          <p>تحديث لحظي تلقائي عبر Supabase Realtime بدون إعادة تحميل الصفحة</p>
         </div>
 
         <div className="header-actions">
-          <span className="badge badge-indigo" style={{ padding: '6px 12px' }}>
+          <span className="badge badge-white" style={{ padding: '6px 12px' }}>
             <Sparkles size={13} />
             نسخة الإعدادات <span className="mono">#{appConfig?.config_revision ?? 1}</span>
           </span>
@@ -221,7 +227,7 @@ export function DashboardTab({
         >
           <div className="kpi-top">
             <span className="kpi-label">إجمالي الأجهزة</span>
-            <span className="kpi-icon" style={{ background: 'var(--primary-soft)', color: 'var(--primary)' }}>
+            <span className="kpi-icon" style={{ background: 'var(--primary-soft)', color: '#ffffff' }}>
               <Smartphone size={18} />
             </span>
           </div>
@@ -310,11 +316,10 @@ export function DashboardTab({
 
       {/* 2 Interactive Recharts Bar Charts */}
       <div className="charts-grid">
-        {/* Chart 1: Top Screens */}
         <article className="glass-panel chart-card">
           <div className="section-heading" style={{ marginBottom: 0 }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-              <Activity size={18} color="var(--primary)" />
+              <Activity size={18} />
               أكتر الشاشات اللي الناس بتقف عندها
             </span>
             <div className="segmented" style={{ padding: 3 }}>
@@ -342,32 +347,28 @@ export function DashboardTab({
               <Clock size={24} color="var(--text-muted)" />
               <strong style={{ fontSize: '0.9rem' }}>لا توجد أحداث شاشات مسجّلة بعد</strong>
               <span style={{ fontSize: '0.79rem' }}>
-                ستظهر الزيارات ومتوسط مدة البقاء فور إرسال التطبيق لأحداث `log_analytics_event`.
+                ستظهر الزيارات ومتوسط مدة البقاء هنا تلقائياً فور تفاعل التطبيق.
               </span>
             </div>
           ) : (
             <div className="chart-box">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={screenData} margin={{ top: 10, right: 12, left: -14, bottom: 8 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false} />
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" vertical={false} />
                   <XAxis
                     dataKey="name"
-                    tick={{ fill: '#98a2b3', fontSize: 12 }}
-                    axisLine={{ stroke: 'rgba(255,255,255,0.08)' }}
+                    tick={{ fill: '#A9AFB9', fontSize: 12 }}
+                    axisLine={{ stroke: 'rgba(255,255,255,0.1)' }}
                     tickLine={false}
                   />
                   <YAxis
-                    tick={{ fill: '#667085', fontSize: 11 }}
+                    tick={{ fill: '#828996', fontSize: 11 }}
                     axisLine={false}
                     tickLine={false}
                     allowDecimals={false}
                   />
-                  <Tooltip content={<ScreenTooltip />} cursor={{ fill: 'rgba(255,255,255,0.03)' }} />
-                  <Bar
-                    dataKey={screenMetric}
-                    radius={[8, 8, 0, 0]}
-                    maxBarSize={46}
-                  >
+                  <Tooltip content={<ScreenTooltip />} cursor={{ fill: 'rgba(255,255,255,0.04)' }} />
+                  <Bar dataKey={screenMetric} radius={[8, 8, 0, 0]} maxBarSize={46}>
                     {screenData.map((entry, idx) => (
                       <Cell key={entry.name} fill={CHART_COLORS[idx % CHART_COLORS.length]} />
                     ))}
@@ -378,7 +379,6 @@ export function DashboardTab({
           )}
         </article>
 
-        {/* Chart 2: Top Wallpapers & Widgets */}
         <article className="glass-panel chart-card">
           <div className="section-heading" style={{ marginBottom: 0 }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
@@ -410,27 +410,27 @@ export function DashboardTab({
               <BarChart3 size={24} color="var(--text-muted)" />
               <strong style={{ fontSize: '0.9rem' }}>لا توجد بيانات استخدام مسجّلة بعد</strong>
               <span style={{ fontSize: '0.79rem' }}>
-                ستمتلئ الرسوم تلقائياً عند تفاعل المستخدمين مع الخلفيات، الـ 40 ويدجيت، وأدوات العمق.
+                ستتحدث الرسوم حياً عبر Realtime عند تفاعل المستخدمين مع الخلفيات والويدجيت.
               </span>
             </div>
           ) : (
             <div className="chart-box">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={usageData} margin={{ top: 10, right: 12, left: -14, bottom: 8 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false} />
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" vertical={false} />
                   <XAxis
                     dataKey="name"
-                    tick={{ fill: '#98a2b3', fontSize: 11 }}
-                    axisLine={{ stroke: 'rgba(255,255,255,0.08)' }}
+                    tick={{ fill: '#A9AFB9', fontSize: 11 }}
+                    axisLine={{ stroke: 'rgba(255,255,255,0.1)' }}
                     tickLine={false}
                   />
                   <YAxis
-                    tick={{ fill: '#667085', fontSize: 11 }}
+                    tick={{ fill: '#828996', fontSize: 11 }}
                     axisLine={false}
                     tickLine={false}
                     allowDecimals={false}
                   />
-                  <Tooltip content={<UsageTooltip />} cursor={{ fill: 'rgba(255,255,255,0.03)' }} />
+                  <Tooltip content={<UsageTooltip />} cursor={{ fill: 'rgba(255,255,255,0.04)' }} />
                   <Bar dataKey="count" radius={[8, 8, 0, 0]} maxBarSize={46}>
                     {usageData.map((entry, idx) => (
                       <Cell key={entry.name} fill={CHART_COLORS[(idx + 2) % CHART_COLORS.length]} />
@@ -443,7 +443,7 @@ export function DashboardTab({
         </article>
       </div>
 
-      {/* Live Overview Strip */}
+      {/* Live System Strip */}
       <div className="glass-panel section-card" style={{ marginBottom: 0 }}>
         <h2 className="section-heading">
           <span>ملخص النظام السحابي المباشر</span>
@@ -455,7 +455,8 @@ export function DashboardTab({
             <div className="field-hint">حالة الإعدادات والمزامنة</div>
             <div style={{ fontWeight: 700, marginTop: 4 }}>
               الإصدار <span className="mono">v{appConfig?.latest_version_name || '1.0.0'}</span>{' '}
-              • مراجعة <span className="mono">#{appConfig?.config_revision ?? 1}</span>
+              (<span className="mono">#{appConfig?.latest_version_code ?? 1}</span>) • مراجعة{' '}
+              <span className="mono">#{appConfig?.config_revision ?? 1}</span>
             </div>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 4 }}>
               آخر تعديل: {formatRelativeTimeAr(appConfig?.updated_at)}
@@ -469,17 +470,14 @@ export function DashboardTab({
               {depthTools.filter((d) => d.is_visible).length}/{depthTools.length} أداة عمق
             </div>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 4 }}>
-              مخصص للمختبر/المطورين:{' '}
-              {widgets.filter((w) => w.target_audience !== 'all').length +
-                depthTools.filter((d) => d.target_audience !== 'all').length}{' '}
-              عنصر
+              خلفيات مدمجة (أوفلاين): {wallpapers.filter((w) => w.is_builtin).length}
             </div>
           </div>
 
           <div className="glass-subcard" style={{ padding: 13 }}>
             <div className="field-hint">آخر أحداث التحليلات المسجلة</div>
             <div style={{ fontWeight: 700, marginTop: 4 }}>
-              <span className="mono">{analyticsEvents.length}</span> حدث في الذاكرة الحديثة
+              <span className="mono">{analyticsEvents.length}</span> حدث مباشر
             </div>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 4 }}>
               {analyticsEvents[0]

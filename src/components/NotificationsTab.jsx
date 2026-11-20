@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Bell,
   MessageSquareMore,
@@ -11,6 +11,9 @@ import {
   Sparkles,
   Link2,
   Repeat,
+  Users,
+  Check,
+  Star,
 } from 'lucide-react';
 import { supabase, triggerSilentSync } from '../lib/supabase';
 import { formatDateAr } from '../lib/formatters';
@@ -28,6 +31,7 @@ import { DeepLinkPicker } from './DeepLinkPicker';
 export function NotificationsTab({
   pushHistory,
   popups,
+  users,
   onRefresh,
   notify,
 }) {
@@ -51,10 +55,39 @@ export function NotificationsTab({
   const [popupAudience, setPopupAudience] = useState('all');
   const [popupMaxShows, setPopupMaxShows] = useState(1);
   const [popupActive, setPopupActive] = useState(true);
+  const [selectedDeviceIds, setSelectedDeviceIds] = useState([]);
+  const [userSearch, setUserSearch] = useState('');
   const [savingPopup, setSavingPopup] = useState(false);
 
   const [deletePopupTarget, setDeletePopupTarget] = useState(null);
   const [deleting, setDeleting] = useState(false);
+
+  const userCodeMap = useMemo(() => {
+    const map = {};
+    users.forEach((u) => {
+      map[u.device_id] = u.user_code;
+    });
+    return map;
+  }, [users]);
+
+  const filteredPickerUsers = useMemo(() => {
+    const q = userSearch.trim().toLowerCase();
+    if (!q) return users;
+    return users.filter(
+      (u) =>
+        (u.user_code || '').toLowerCase().includes(q) ||
+        (u.device_model || '').toLowerCase().includes(q) ||
+        (u.admin_note || '').toLowerCase().includes(q),
+    );
+  }, [users, userSearch]);
+
+  function toggleTargetDevice(deviceId) {
+    setSelectedDeviceIds((prev) =>
+      prev.includes(deviceId)
+        ? prev.filter((id) => id !== deviceId)
+        : [...prev, deviceId],
+    );
+  }
 
   async function handleSendPush(e) {
     e.preventDefault();
@@ -100,9 +133,14 @@ export function NotificationsTab({
       notify('يرجى إدخال عنوان ومحتوى الرسالة المنبثقة', 'error');
       return;
     }
+    if (popupAudience === 'specific' && selectedDeviceIds.length === 0) {
+      notify('يرجى اختيار مستخدم واحد على الأقل عند تحديد "مستخدمين محددين"', 'error');
+      return;
+    }
 
     setSavingPopup(true);
     try {
+      const targetDevices = popupAudience === 'specific' ? selectedDeviceIds : [];
       const { error } = await supabase.from('popup_announcements').insert({
         title: popupTitle.trim(),
         body: popupBody.trim(),
@@ -111,6 +149,7 @@ export function NotificationsTab({
         deep_link: popupDeepLink.trim() || null,
         action_url: popupActionUrl.trim() || popupDeepLink.trim() || null,
         target_audience: popupAudience,
+        target_device_ids: targetDevices,
         max_shows_per_user: Number(popupMaxShows),
         is_active: popupActive,
       });
@@ -125,6 +164,8 @@ export function NotificationsTab({
       setPopupDeepLink('');
       setPopupActionUrl('');
       setPopupAudience('all');
+      setSelectedDeviceIds([]);
+      setUserSearch('');
       setPopupMaxShows(1);
       setPopupActive(true);
       await onRefresh();
@@ -180,7 +221,7 @@ export function NotificationsTab({
       <div className="page-header">
         <div className="page-title-group">
           <h1>الإشعارات والرسائل المنبثقة</h1>
-          <p>إشعارات FCM فورية مع التوجيه العميق (Deep Links) ورسائل منبثقة محددة التكرار</p>
+          <p>إشعارات FCM فورية مع التوجيه العميق ورسائل منبثقة عامة أو لمستخدمين محددين</p>
         </div>
 
         <div className="segmented">
@@ -206,11 +247,10 @@ export function NotificationsTab({
       {subTab === 'push' ? (
         <>
           <div className="form-grid cols-2" style={{ marginBottom: 20 }}>
-            {/* Push Form */}
             <form onSubmit={handleSendPush} className="glass-panel section-card" style={{ marginBottom: 0 }}>
               <h2 className="section-heading">
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                  <Send size={18} color="var(--primary)" />
+                  <Send size={18} />
                   إرسال إشعار فوري جديد
                 </span>
               </h2>
@@ -311,13 +351,13 @@ export function NotificationsTab({
                   <Sparkles size={18} color="var(--amber)" />
                   معاينة الإشعار على أندرويد
                 </span>
-                <span className="badge badge-indigo">{getTopicLabelAr(pushTopic)}</span>
+                <span className="badge badge-white">{getTopicLabelAr(pushTopic)}</span>
               </h2>
 
               <div className="push-preview">
                 <div className="push-preview-head">
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 600 }}>
-                    <Bell size={13} color="var(--primary)" />
+                    <Bell size={13} />
                     Glassyfi
                   </span>
                   <span>الآن</span>
@@ -340,7 +380,7 @@ export function NotificationsTab({
                 )}
                 {pushDeepLink.trim() && (
                   <div style={{ marginTop: 4 }}>
-                    <span className="badge badge-indigo mono">
+                    <span className="badge badge-white mono">
                       <Link2 size={11} /> {pushDeepLink.trim()}
                     </span>
                   </div>
@@ -358,7 +398,7 @@ export function NotificationsTab({
           <div className="glass-panel section-card" style={{ marginBottom: 0 }}>
             <h2 className="section-heading">
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                <History size={18} color="var(--primary)" />
+                <History size={18} />
                 سجل الإشعارات المرسلة ({pushHistory.length})
               </span>
             </h2>
@@ -393,10 +433,10 @@ export function NotificationsTab({
                           width: 40,
                           height: 40,
                           borderRadius: 11,
-                          background: 'var(--primary-soft)',
+                          background: 'var(--bg-input)',
+                          border: '1px solid var(--glass-border)',
                           display: 'grid',
                           placeItems: 'center',
-                          color: 'var(--primary)',
                           flexShrink: 0,
                         }}
                       >
@@ -422,7 +462,7 @@ export function NotificationsTab({
                               : getTopicLabelAr(item.topic)}
                           </span>
                           {item.deep_link && (
-                            <span className="badge badge-indigo mono">{item.deep_link}</span>
+                            <span className="badge badge-white mono">{item.deep_link}</span>
                           )}
                         </div>
                       </div>
@@ -446,12 +486,12 @@ export function NotificationsTab({
           </div>
         </>
       ) : (
-        /* In-App Pop-up Announcements */
+        /* In-App Pop-up Announcements with Targeted Multi-User Picker */
         <>
           <form onSubmit={handleCreatePopup} className="glass-panel section-card">
             <h2 className="section-heading">
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                <MessageSquareMore size={18} color="var(--primary)" />
+                <MessageSquareMore size={18} />
                 إنشاء رسالة منبثقة داخل التطبيق
               </span>
             </h2>
@@ -507,6 +547,71 @@ export function NotificationsTab({
                 </select>
               </div>
             </div>
+
+            {/* Searchable Multi-Select User Picker when audience === 'specific' */}
+            {popupAudience === 'specific' && (
+              <div className="glass-subcard" style={{ padding: 14, marginBottom: 14 }}>
+                <div className="field-label" style={{ marginBottom: 9 }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <Users size={15} />
+                    اختر المستخدمين المستهدفين (تظهر الرسالة لهم فقط)
+                  </span>
+                  <span className="badge badge-white">{selectedDeviceIds.length} محدد</span>
+                </div>
+
+                <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                  <input
+                    type="search"
+                    className="input"
+                    style={{ padding: '8px 11px', fontSize: '0.82rem' }}
+                    placeholder="ابحث بكود المستخدم أو نوع الهاتف أو الملاحظة..."
+                    value={userSearch}
+                    onChange={(e) => setUserSearch(e.target.value)}
+                  />
+                  {selectedDeviceIds.length > 0 && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => setSelectedDeviceIds([])}
+                    >
+                      مسح التحديد
+                    </button>
+                  )}
+                </div>
+
+                {filteredPickerUsers.length === 0 ? (
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', padding: 10, textAlign: 'center' }}>
+                    لا يوجد مستخدمون مطابقون للبحث
+                  </div>
+                ) : (
+                  <div className="unlock-grid">
+                    {filteredPickerUsers.map((u) => {
+                      const isSel = selectedDeviceIds.includes(u.device_id);
+                      return (
+                        <button
+                          key={u.device_id}
+                          type="button"
+                          className={`unlock-item${isSel ? ' selected' : ''}`}
+                          onClick={() => toggleTargetDevice(u.device_id)}
+                        >
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontWeight: 700 }}>
+                              <span className="mono">{u.user_code}</span>
+                              {u.is_starred && <Star size={12} color="var(--amber)" fill="currentColor" />}
+                            </div>
+                            <div style={{ fontSize: '0.71rem', opacity: 0.78, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {u.device_model || 'جهاز غير معروف'}
+                              {u.admin_note ? ` • ${u.admin_note}` : ''}
+                            </div>
+                          </div>
+                          {isSel && <Check size={14} style={{ flexShrink: 0 }} />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="field" style={{ marginBottom: 14 }}>
               <label className="field-label" htmlFor="pop-body">
@@ -609,7 +714,12 @@ export function NotificationsTab({
           ) : (
             <div className="cards-grid cols-2">
               {popups.map((popup) => {
-                const aud = getAudienceBadge(popup.target_audience);
+                const targetedIds = Array.isArray(popup.target_device_ids)
+                  ? popup.target_device_ids
+                  : [];
+                const isTargeted = targetedIds.length > 0 || popup.target_audience === 'specific';
+                const aud = getAudienceBadge(isTargeted ? 'specific' : popup.target_audience);
+
                 return (
                   <article key={popup.id} className="glass-panel user-card">
                     {popup.image_url && (
@@ -628,7 +738,9 @@ export function NotificationsTab({
                     <div className="user-card-top">
                       <strong style={{ fontSize: '0.98rem' }}>{popup.title}</strong>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-                        <span className={`badge ${aud.className}`}>{aud.label}</span>
+                        <span className={`badge ${aud.className}`}>
+                          {isTargeted ? `محدد (${targetedIds.length} جهاز)` : aud.label}
+                        </span>
                         <span className="badge badge-sky">
                           <Repeat size={11} /> {maxShowsLabel(popup.max_shows_per_user ?? 1)}
                         </span>
@@ -644,7 +756,20 @@ export function NotificationsTab({
                       {popup.body}
                     </p>
 
-                    {(popup.action_text || popup.deep_link || popup.action_url) && (
+                    {targetedIds.length > 0 && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                        {targetedIds.slice(0, 6).map((devId) => (
+                          <span key={devId} className="badge badge-neutral mono">
+                            {userCodeMap[devId] || devId.slice(0, 10)}
+                          </span>
+                        ))}
+                        {targetedIds.length > 6 && (
+                          <span className="badge badge-neutral">+{targetedIds.length - 6}</span>
+                        )}
+                      </div>
+                    )}
+
+                    {(popup.action_text || popup.deep_link) && (
                       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 7, fontSize: '0.78rem' }}>
                         {popup.action_text && (
                           <span className="badge badge-neutral">
@@ -652,7 +777,7 @@ export function NotificationsTab({
                           </span>
                         )}
                         {popup.deep_link && (
-                          <span className="badge badge-indigo mono">
+                          <span className="badge badge-white mono">
                             <Link2 size={11} /> {popup.deep_link}
                           </span>
                         )}

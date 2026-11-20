@@ -5,11 +5,12 @@ export const AUDIENCE_OPTIONS = [
 ];
 
 export const POPUP_AUDIENCE_OPTIONS = [
-  { value: 'all', label: 'الكل' },
+  { value: 'all', label: 'الكل (جميع المستخدمين)' },
   { value: 'free', label: 'المجاني فقط' },
   { value: 'pro', label: 'مشتركو Pro' },
   { value: 'lab', label: 'أعضاء المختبر (Lab)' },
   { value: 'dev', label: 'المطورين (Dev)' },
+  { value: 'specific', label: 'مستخدمين محددين (اختيار يدوي)' },
 ];
 
 export const PUSH_TOPIC_OPTIONS = [
@@ -47,7 +48,7 @@ export const DEPTH_GROUP_META = {
 export const ROLE_META = {
   normal: { label: 'عادي', badgeClass: 'badge-neutral' },
   lab: { label: 'عضو مختبر', badgeClass: 'badge-emerald' },
-  dev: { label: 'مطوّر', badgeClass: 'badge-indigo' },
+  dev: { label: 'مطوّر', badgeClass: 'badge-white' },
 };
 
 export const MAX_SHOWS_OPTIONS = [
@@ -74,7 +75,8 @@ export const SCREEN_LABELS_AR = {
 };
 
 export function getAudienceBadge(audience) {
-  if (audience === 'dev') return { label: 'مطورين فقط', className: 'badge-indigo' };
+  if (audience === 'specific') return { label: 'مستخدمين محددين', className: 'badge-white' };
+  if (audience === 'dev') return { label: 'مطورين فقط', className: 'badge-sky' };
   if (audience === 'lab') return { label: 'المختبر والمطورين', className: 'badge-emerald' };
   if (audience === 'pro') return { label: 'Pro فقط', className: 'badge-amber' };
   if (audience === 'free') return { label: 'المجاني فقط', className: 'badge-neutral' };

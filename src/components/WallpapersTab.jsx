@@ -19,6 +19,7 @@ import {
   Loader2,
   Check,
   Link2,
+  HardDrive,
 } from 'lucide-react';
 import { supabase, triggerSilentSync, WALLPAPERS_BUCKET } from '../lib/supabase';
 import {
@@ -53,6 +54,10 @@ const INITIAL_FORM = {
   is_pro: false,
   is_active: true,
 };
+
+function isHttpUrl(url) {
+  return typeof url === 'string' && /^https?:\/\//i.test(url);
+}
 
 export function WallpapersTab({
   wallpapers,
@@ -121,7 +126,12 @@ export function WallpapersTab({
       if (selectedCategory !== 'all' && item.category_slug !== selectedCategory) {
         return false;
       }
-      if (selectedType !== 'all' && item.wallpaper_type !== selectedType) {
+      if (selectedType === 'builtin' && !item.is_builtin) return false;
+      if (
+        selectedType !== 'all' &&
+        selectedType !== 'builtin' &&
+        item.wallpaper_type !== selectedType
+      ) {
         return false;
       }
       if (selectedAudience !== 'all_filter' && (item.target_audience || 'all') !== selectedAudience) {
@@ -130,20 +140,22 @@ export function WallpapersTab({
       if (q) {
         const matchAr = (item.title_ar || '').toLowerCase().includes(q);
         const matchEn = (item.title_en || '').toLowerCase().includes(q);
-        if (!matchAr && !matchEn) return false;
+        const matchKey = (item.builtin_asset_key || '').toLowerCase().includes(q);
+        if (!matchAr && !matchEn && !matchKey) return false;
       }
       return true;
     });
   }, [wallpapers, selectedCategory, selectedType, selectedAudience, searchQuery]);
 
-  async function copyDeepLink(wpId) {
-    const link = `glassyfi://wallpaper/${wpId}`;
+  async function copyDeepLink(wp) {
+    const keyOrId = wp.is_builtin && wp.builtin_asset_key ? wp.builtin_asset_key : wp.id;
+    const link = `glassyfi://wallpaper/${keyOrId}`;
     try {
       await navigator.clipboard.writeText(link);
-      setCopiedId(wpId);
+      setCopiedId(wp.id);
       notify(`تم نسخ رابط العمق المباشر: ${link}`, 'info');
       setTimeout(() => {
-        setCopiedId((prev) => (prev === wpId ? '' : prev));
+        setCopiedId((prev) => (prev === wp.id ? '' : prev));
       }, 1800);
     } catch {
       notify('تعذر النسخ التلقائي', 'error');
@@ -266,6 +278,7 @@ export function WallpapersTab({
         is_exclusive: form.is_exclusive,
         is_pro: form.is_pro,
         is_active: form.is_active,
+        is_builtin: false,
         sort_order: Number(form.sort_order) || 0,
       });
 
@@ -337,7 +350,7 @@ export function WallpapersTab({
   }
 
   async function confirmDeleteWallpaper() {
-    if (!deleteTarget) return;
+    if (!deleteTarget || deleteTarget.is_builtin) return;
     setDeleting(true);
     try {
       const { error } = await supabase
@@ -442,12 +455,14 @@ export function WallpapersTab({
     return 'عمق Depth';
   }
 
+  const builtinCount = wallpapers.filter((w) => w.is_builtin).length;
+
   return (
     <section>
       <div className="page-header">
         <div className="page-title-group">
           <h1>الخلفيات</h1>
-          <p>رفع خلفيات أصلية بجودة كاملة، استهداف المختبر أو المطورين، ومزامنة فورية</p>
+          <p>إدارة الخلفيات السحابية الأصلية والخلفيات المدمجة (أوفلاين) والتحكم بجمهورها فورياً</p>
         </div>
 
         <div className="header-actions">
@@ -479,10 +494,10 @@ export function WallpapersTab({
         >
           <h2 className="section-heading">
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-              <Upload size={18} color="var(--primary)" />
+              <Upload size={18} />
               رفع خلفية جديدة (Lossless Original)
             </span>
-            <span className="badge badge-indigo">حتى 25MB • WebP Thumb تلقائي</span>
+            <span className="badge badge-white">حتى 25MB • WebP Thumb تلقائي</span>
           </h2>
 
           <div className="form-grid cols-2" style={{ marginBottom: 15 }}>
@@ -610,7 +625,7 @@ export function WallpapersTab({
                   </>
                 ) : (
                   <>
-                    <Upload size={25} color="var(--primary)" />
+                    <Upload size={25} />
                     <strong>اختر الصورة أو اسحبها هنا</strong>
                     <span className="field-hint">
                       JPG / PNG / WebP • ترفع بجودتها الأصلية 100%
@@ -625,7 +640,7 @@ export function WallpapersTab({
                 <span className="field-label">
                   صورة الليل الأصلية *
                   {nightFile && (
-                    <span className="badge badge-indigo">{formatFileSize(nightFile.size)}</span>
+                    <span className="badge badge-white">{formatFileSize(nightFile.size)}</span>
                   )}
                 </span>
                 <label className={`dropzone${nightFile ? ' has-file' : ''}`}>
@@ -645,7 +660,7 @@ export function WallpapersTab({
                     </>
                   ) : (
                     <>
-                      <Moon size={25} color="var(--primary)" />
+                      <Moon size={25} />
                       <strong>اختر صورة الليل</strong>
                       <span className="field-hint">تُعرض تلقائياً في الوضع الليلي</span>
                     </>
@@ -655,19 +670,18 @@ export function WallpapersTab({
             )}
           </div>
 
-          {/* Badge & Visibility Switches */}
           <div className="form-grid cols-2" style={{ marginBottom: 16 }}>
             <div className="switch-row">
               <div className="switch-meta">
                 <span className="switch-title">
-                  <Sparkles size={15} color="var(--primary)" /> جديد (New)
+                  <Sparkles size={15} /> جديد (New)
                 </span>
                 <span className="switch-desc">إظهار شارة "جديد" على البطاقة</span>
               </div>
               <ToggleSwitch
                 checked={form.is_new}
                 onChange={(v) => setForm((p) => ({ ...p, is_new: v }))}
-                tone="indigo"
+                tone="white"
                 ariaLabel="جديد"
               />
             </div>
@@ -705,7 +719,7 @@ export function WallpapersTab({
             <div className="switch-row">
               <div className="switch-meta">
                 <span className="switch-title">
-                  <Eye size={15} color="var(--text-primary)" /> ظاهرة في التطبيق
+                  <Eye size={15} /> ظاهرة في التطبيق
                 </span>
                 <span className="switch-desc">إخفاء أو إظهار الخلفية للمستخدمين</span>
               </div>
@@ -757,43 +771,48 @@ export function WallpapersTab({
             <input
               type="search"
               className="input"
-              placeholder="ابحث باسم الخلفية..."
+              placeholder="ابحث باسم الخلفية أو مفتاح الأصل المدمج..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
           </div>
 
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            <div className="segmented">
-              <button
-                type="button"
-                className={`segmented-btn${selectedType === 'all' ? ' active' : ''}`}
-                onClick={() => setSelectedType('all')}
-              >
-                الكل ({wallpapers.length})
-              </button>
-              <button
-                type="button"
-                className={`segmented-btn${selectedType === 'depth' ? ' active' : ''}`}
-                onClick={() => setSelectedType('depth')}
-              >
-                عمق
-              </button>
-              <button
-                type="button"
-                className={`segmented-btn${selectedType === 'dual_day_night' ? ' active' : ''}`}
-                onClick={() => setSelectedType('dual_day_night')}
-              >
-                نهار وليل
-              </button>
-              <button
-                type="button"
-                className={`segmented-btn${selectedType === 'standard' ? ' active' : ''}`}
-                onClick={() => setSelectedType('standard')}
-              >
-                عادية
-              </button>
-            </div>
+          <div className="segmented" style={{ justifySelf: 'start' }}>
+            <button
+              type="button"
+              className={`segmented-btn${selectedType === 'all' ? ' active' : ''}`}
+              onClick={() => setSelectedType('all')}
+            >
+              الكل ({wallpapers.length})
+            </button>
+            <button
+              type="button"
+              className={`segmented-btn${selectedType === 'builtin' ? ' active' : ''}`}
+              onClick={() => setSelectedType('builtin')}
+            >
+              مدمجة ({builtinCount})
+            </button>
+            <button
+              type="button"
+              className={`segmented-btn${selectedType === 'depth' ? ' active' : ''}`}
+              onClick={() => setSelectedType('depth')}
+            >
+              عمق
+            </button>
+            <button
+              type="button"
+              className={`segmented-btn${selectedType === 'dual_day_night' ? ' active' : ''}`}
+              onClick={() => setSelectedType('dual_day_night')}
+            >
+              نهار وليل
+            </button>
+            <button
+              type="button"
+              className={`segmented-btn${selectedType === 'standard' ? ' active' : ''}`}
+              onClick={() => setSelectedType('standard')}
+            >
+              عادية
+            </button>
           </div>
         </div>
 
@@ -841,7 +860,7 @@ export function WallpapersTab({
       {/* Wallpapers Grid */}
       {loading && wallpapers.length === 0 ? (
         <div className="glass-panel empty-state">
-          <Loader2 size={28} className="spinner" color="var(--primary)" />
+          <Loader2 size={28} className="spinner" />
           <span>جاري تحميل الخلفيات...</span>
         </div>
       ) : filteredWallpapers.length === 0 ? (
@@ -850,19 +869,17 @@ export function WallpapersTab({
             <ImageIcon size={24} />
           </div>
           <strong>لا توجد خلفيات مطابقة حالياً</strong>
-          <span style={{ fontSize: '0.84rem' }}>
-            اضغط على "إضافة خلفية جديدة" لرفع خلفية بجودة أصلية وتحديد جمهورها.
-          </span>
         </div>
       ) : (
         <div className="wallpapers-grid">
           {filteredWallpapers.map((wp) => {
             const isDual = wp.wallpaper_type === 'dual_day_night' && wp.night_image_url;
             const showingNight = Boolean(nightPreviewMap[wp.id]);
-            const previewSrc =
+            const candidateSrc =
               isDual && showingNight
                 ? wp.night_image_url
                 : wp.thumbnail_url || wp.image_url;
+            const hasHttpImage = isHttpUrl(candidateSrc);
             const isBusy = Boolean(busyCardIds[wp.id]);
             const aud = wp.target_audience || 'all';
             const audBadge = getAudienceBadge(aud);
@@ -870,11 +887,35 @@ export function WallpapersTab({
             return (
               <article key={wp.id} className="glass-panel wallpaper-card">
                 <div className="wallpaper-media">
-                  <img src={previewSrc} alt={wp.title_ar} loading="lazy" />
+                  {hasHttpImage ? (
+                    <img src={candidateSrc} alt={wp.title_ar} loading="lazy" />
+                  ) : (
+                    <div className="builtin-media-art">
+                      <div className="builtin-media-icon">
+                        {wp.wallpaper_type === 'dual_day_night' ? (
+                          <Sun size={26} />
+                        ) : (
+                          <Layers size={26} />
+                        )}
+                      </div>
+                      <strong style={{ fontSize: '0.96rem' }}>{wp.title_ar}</strong>
+                      <span className="badge badge-sky">
+                        <HardDrive size={11} /> مدمجة (أوفلاين)
+                      </span>
+                      {wp.builtin_asset_key && (
+                        <span className="widget-key-pill">{wp.builtin_asset_key}</span>
+                      )}
+                    </div>
+                  )}
 
                   <div className="wallpaper-overlay-top">
                     <div className="wallpaper-overlay-badges">
                       <span className="wallpaper-media-pill">{typeLabel(wp.wallpaper_type)}</span>
+                      {wp.is_builtin && (
+                        <span className="badge badge-sky">
+                          <HardDrive size={11} /> مدمجة (أوفلاين)
+                        </span>
+                      )}
                       {aud !== 'all' && (
                         <span className={`badge ${audBadge.className}`}>
                           {audBadge.label}
@@ -890,7 +931,7 @@ export function WallpapersTab({
                       )}
                     </div>
 
-                    {isDual && (
+                    {isDual && hasHttpImage && (
                       <button
                         type="button"
                         className="dual-switch-btn"
@@ -929,9 +970,14 @@ export function WallpapersTab({
                       type="button"
                       className="btn btn-danger btn-icon"
                       style={{ width: 32, height: 32, flexShrink: 0 }}
-                      onClick={() => setDeleteTarget(wp)}
+                      disabled={Boolean(wp.is_builtin)}
+                      onClick={() => !wp.is_builtin && setDeleteTarget(wp)}
                       aria-label={`حذف ${wp.title_ar}`}
-                      title="حذف الخلفية"
+                      title={
+                        wp.is_builtin
+                          ? 'خلفية مدمجة داخل التطبيق — يمكنك إخفاؤها ولا يمكن حذفها'
+                          : 'حذف الخلفية'
+                      }
                     >
                       <Trash2 size={14} />
                     </button>
@@ -942,7 +988,7 @@ export function WallpapersTab({
                     <button
                       type="button"
                       disabled={isBusy}
-                      className={`quick-toggle-pill${wp.is_new ? ' active-indigo' : ''}`}
+                      className={`quick-toggle-pill${wp.is_new ? ' active-white' : ''}`}
                       onClick={() => handleToggleFlag(wp, 'is_new')}
                     >
                       <Sparkles size={12} /> جديد
@@ -989,11 +1035,10 @@ export function WallpapersTab({
                     ))}
                   </div>
 
-                  {/* Copy Deep Link Button */}
                   <button
                     type="button"
                     className="btn btn-secondary btn-sm btn-block"
-                    onClick={() => copyDeepLink(wp.id)}
+                    onClick={() => copyDeepLink(wp)}
                   >
                     {copiedId === wp.id ? (
                       <>
@@ -1013,14 +1058,18 @@ export function WallpapersTab({
                       <Download size={13} />
                       <span className="mono">{wp.downloads_count || 0}</span> تحميل
                     </span>
-                    <a
-                      href={wp.image_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ color: 'var(--primary)', textDecoration: 'none', fontWeight: 600 }}
-                    >
-                      عرض الأصل ↗
-                    </a>
+                    {isHttpUrl(wp.image_url) ? (
+                      <a
+                        href={wp.image_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ color: 'var(--text-primary)', textDecoration: 'none', fontWeight: 600 }}
+                      >
+                        عرض الأصل ↗
+                      </a>
+                    ) : (
+                      <span style={{ color: 'var(--sky)', fontWeight: 600 }}>أصل محلي أوفلاين</span>
+                    )}
                   </div>
                 </div>
               </article>

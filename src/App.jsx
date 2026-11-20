@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Sparkles,
   BarChart3,
@@ -62,6 +62,22 @@ const ALL_TABS = NAV_GROUPS.flatMap((g) => g.items);
 const MOBILE_PRIMARY_IDS = ['dashboard', 'wallpapers', 'widgets', 'users'];
 const MOBILE_MORE_IDS = ['lab_feedback', 'security', 'notifications', 'config'];
 
+const REALTIME_TABLES = [
+  'app_users',
+  'analytics_events',
+  'security_alerts',
+  'user_feedback',
+  'lab_applications',
+  'wallpapers',
+  'widgets_config',
+  'depth_tools_config',
+  'popup_announcements',
+  'app_config',
+  'promo_codes',
+  'categories',
+  'push_history',
+];
+
 export default function App() {
   const [authChecking, setAuthChecking] = useState(true);
   const [session, setSession] = useState(null);
@@ -71,6 +87,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [dataLoading, setDataLoading] = useState(false);
+  const [realtimeStatus, setRealtimeStatus] = useState('connecting'); // 'connecting' | 'live'
 
   const [categories, setCategories] = useState([]);
   const [wallpapers, setWallpapers] = useState([]);
@@ -87,6 +104,7 @@ export default function App() {
   const [labApplications, setLabApplications] = useState([]);
 
   const [toasts, setToasts] = useState([]);
+  const debounceTimersRef = useRef({});
 
   const notify = useCallback((message, type = 'info') => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -100,122 +118,157 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
+  // Targeted per-table refresh for instant zero-flicker Realtime updates
+  const refreshTable = useCallback(async (tableName) => {
+    try {
+      switch (tableName) {
+        case 'categories': {
+          const { data } = await supabase
+            .from('categories')
+            .select('*')
+            .order('sort_order', { ascending: true })
+            .order('created_at', { ascending: true });
+          if (data) setCategories(data);
+          break;
+        }
+        case 'wallpapers': {
+          const { data } = await supabase
+            .from('wallpapers')
+            .select('*')
+            .order('is_builtin', { ascending: false })
+            .order('sort_order', { ascending: true })
+            .order('created_at', { ascending: false });
+          if (data) setWallpapers(data);
+          break;
+        }
+        case 'widgets_config': {
+          const { data } = await supabase
+            .from('widgets_config')
+            .select('*')
+            .order('sort_order', { ascending: true });
+          if (data) setWidgets(data);
+          break;
+        }
+        case 'depth_tools_config': {
+          const { data } = await supabase
+            .from('depth_tools_config')
+            .select('*')
+            .order('sort_order', { ascending: true });
+          if (data) setDepthTools(data);
+          break;
+        }
+        case 'app_users': {
+          const { data } = await supabase
+            .from('app_users')
+            .select('*')
+            .order('is_starred', { ascending: false })
+            .order('last_seen_at', { ascending: false })
+            .limit(400);
+          if (data) setUsers(data);
+          break;
+        }
+        case 'promo_codes': {
+          const { data } = await supabase
+            .from('promo_codes')
+            .select('*')
+            .order('created_at', { ascending: false });
+          if (data) setPromoCodes(data);
+          break;
+        }
+        case 'push_history': {
+          const { data } = await supabase
+            .from('push_history')
+            .select('*')
+            .order('sent_at', { ascending: false })
+            .limit(50);
+          if (data) setPushHistory(data);
+          break;
+        }
+        case 'popup_announcements': {
+          const { data } = await supabase
+            .from('popup_announcements')
+            .select('*')
+            .order('created_at', { ascending: false });
+          if (data) setPopups(data);
+          break;
+        }
+        case 'app_config': {
+          const { data } = await supabase
+            .from('app_config')
+            .select('*')
+            .eq('id', 1)
+            .maybeSingle();
+          if (data) setAppConfig(data);
+          break;
+        }
+        case 'security_alerts': {
+          const { data } = await supabase
+            .from('security_alerts')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(150);
+          if (data) setSecurityAlerts(data);
+          break;
+        }
+        case 'analytics_events': {
+          const { data } = await supabase
+            .from('analytics_events')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(1500);
+          if (data) setAnalyticsEvents(data);
+          break;
+        }
+        case 'user_feedback': {
+          const { data } = await supabase
+            .from('user_feedback')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(200);
+          if (data) setUserFeedback(data);
+          break;
+        }
+        case 'lab_applications': {
+          const { data } = await supabase
+            .from('lab_applications')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(200);
+          if (data) setLabApplications(data);
+          break;
+        }
+        default:
+          break;
+      }
+    } catch {
+      // Non-fatal realtime refresh glitch; next event or manual refresh will catch up
+    }
+  }, []);
+
+  const scheduleTableRefresh = useCallback(
+    (tableName) => {
+      if (debounceTimersRef.current[tableName]) {
+        clearTimeout(debounceTimersRef.current[tableName]);
+      }
+      debounceTimersRef.current[tableName] = setTimeout(() => {
+        refreshTable(tableName);
+      }, 220);
+    },
+    [refreshTable],
+  );
+
   const fetchAllData = useCallback(async () => {
     setDataLoading(true);
     try {
-      const [
-        catRes,
-        wpRes,
-        widRes,
-        depthRes,
-        usrRes,
-        promoRes,
-        pushRes,
-        popRes,
-        cfgRes,
-        secRes,
-        anaRes,
-        fbRes,
-        labRes,
-      ] = await Promise.all([
-        supabase
-          .from('categories')
-          .select('*')
-          .order('sort_order', { ascending: true })
-          .order('created_at', { ascending: true }),
-        supabase
-          .from('wallpapers')
-          .select('*')
-          .order('sort_order', { ascending: true })
-          .order('created_at', { ascending: false }),
-        supabase
-          .from('widgets_config')
-          .select('*')
-          .order('sort_order', { ascending: true }),
-        supabase
-          .from('depth_tools_config')
-          .select('*')
-          .order('sort_order', { ascending: true }),
-        supabase
-          .from('app_users')
-          .select('*')
-          .order('last_seen_at', { ascending: false })
-          .limit(400),
-        supabase
-          .from('promo_codes')
-          .select('*')
-          .order('created_at', { ascending: false }),
-        supabase
-          .from('push_history')
-          .select('*')
-          .order('sent_at', { ascending: false })
-          .limit(50),
-        supabase
-          .from('popup_announcements')
-          .select('*')
-          .order('created_at', { ascending: false }),
-        supabase.from('app_config').select('*').eq('id', 1).maybeSingle(),
-        supabase
-          .from('security_alerts')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(150),
-        supabase
-          .from('analytics_events')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(1500),
-        supabase
-          .from('user_feedback')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(200),
-        supabase
-          .from('lab_applications')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(200),
-      ]);
-
-      const firstError =
-        catRes.error ||
-        wpRes.error ||
-        widRes.error ||
-        depthRes.error ||
-        usrRes.error ||
-        promoRes.error ||
-        pushRes.error ||
-        popRes.error ||
-        cfgRes.error ||
-        secRes.error ||
-        anaRes.error ||
-        fbRes.error ||
-        labRes.error;
-
-      if (firstError) {
-        notify(`تنبيه أثناء جلب البيانات: ${firstError.message}`, 'error');
-      }
-
-      if (catRes.data) setCategories(catRes.data);
-      if (wpRes.data) setWallpapers(wpRes.data);
-      if (widRes.data) setWidgets(widRes.data);
-      if (depthRes.data) setDepthTools(depthRes.data);
-      if (usrRes.data) setUsers(usrRes.data);
-      if (promoRes.data) setPromoCodes(promoRes.data);
-      if (pushRes.data) setPushHistory(pushRes.data);
-      if (popRes.data) setPopups(popRes.data);
-      if (cfgRes.data) setAppConfig(cfgRes.data);
-      if (secRes.data) setSecurityAlerts(secRes.data);
-      if (anaRes.data) setAnalyticsEvents(anaRes.data);
-      if (fbRes.data) setUserFeedback(fbRes.data);
-      if (labRes.data) setLabApplications(labRes.data);
+      await Promise.all(REALTIME_TABLES.map((tbl) => refreshTable(tbl)));
     } catch {
       notify('تعذر تحديث البيانات من الخادم', 'error');
     } finally {
       setDataLoading(false);
     }
-  }, [notify]);
+  }, [notify, refreshTable]);
 
+  // Restore session & enforce admin_users check
   useEffect(() => {
     let active = true;
 
@@ -264,11 +317,39 @@ export default function App() {
     };
   }, []);
 
+  // Load initial data + establish live Supabase Realtime postgres_changes subscription
   useEffect(() => {
-    if (session && adminRecord) {
-      fetchAllData();
-    }
-  }, [session, adminRecord, fetchAllData]);
+    if (!session || !adminRecord) return undefined;
+
+    fetchAllData();
+    setRealtimeStatus('connecting');
+
+    let channel = supabase.channel('glassyfi-admin-live-v3');
+    REALTIME_TABLES.forEach((table) => {
+      channel = channel.on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table },
+        () => {
+          scheduleTableRefresh(table);
+        },
+      );
+    });
+
+    channel.subscribe((status) => {
+      if (status === 'SUBSCRIBED') {
+        setRealtimeStatus('live');
+      } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+        setRealtimeStatus('connecting');
+      }
+    });
+
+    const timersMap = debounceTimersRef.current;
+    return () => {
+      Object.values(timersMap).forEach((t) => clearTimeout(t));
+      supabase.removeChannel(channel);
+      setRealtimeStatus('connecting');
+    };
+  }, [session, adminRecord, fetchAllData, scheduleTableRefresh]);
 
   async function handleLogout() {
     await supabase.auth.signOut();
@@ -322,7 +403,7 @@ export default function App() {
     return (
       <main className="login-shell">
         <div className="glass-panel login-card" style={{ textAlign: 'center', padding: 40 }}>
-          <Loader2 size={30} className="spinner" color="var(--primary)" style={{ margin: '0 auto 12px' }} />
+          <Loader2 size={30} className="spinner" style={{ margin: '0 auto 12px' }} />
           <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
             جاري التحقق من الجلسة...
           </div>
@@ -341,7 +422,7 @@ export default function App() {
             setAuthError('');
             setSession(nextSession);
             setAdminRecord(record);
-            notify('أهلاً بك في لوحة تحكم Glassyfi v2', 'success');
+            notify('أهلاً بك في لوحة تحكم Glassyfi v3 المباشرة', 'success');
           }}
         />
       </>
@@ -355,14 +436,14 @@ export default function App() {
     <div className="app-shell">
       <ToastList toasts={toasts} onDismiss={dismissToast} />
 
-      {/* Mobile Sticky Header */}
+      {/* Mobile Sticky Header with Live Pulsing Badge */}
       <header className="mobile-topbar">
         <div className="brand-mark">
-          <div className="brand-icon" style={{ width: 36, height: 36, borderRadius: 11 }}>
-            <Sparkles size={19} />
+          <div className="brand-icon" style={{ width: 35, height: 35, borderRadius: 10 }}>
+            <Sparkles size={18} />
           </div>
           <div>
-            <div className="brand-title" style={{ fontSize: '0.98rem' }}>
+            <div className="brand-title" style={{ fontSize: '0.95rem' }}>
               Glassyfi Admin
             </div>
             <div className="brand-subtitle">{currentTabMeta.label}</div>
@@ -370,6 +451,13 @@ export default function App() {
         </div>
 
         <div className="mobile-topbar-actions">
+          <span
+            className={`live-pill${realtimeStatus === 'live' ? '' : ' connecting'}`}
+            style={{ padding: '4px 9px', fontSize: '0.7rem' }}
+          >
+            <span className="live-pulse-dot" />
+            {realtimeStatus === 'live' ? 'مباشر' : '...'}
+          </span>
           <button
             type="button"
             className="btn btn-secondary btn-icon"
@@ -377,7 +465,7 @@ export default function App() {
             disabled={dataLoading}
             aria-label="تحديث البيانات"
           >
-            <RefreshCw size={16} className={dataLoading ? 'spinner' : ''} />
+            <RefreshCw size={15} className={dataLoading ? 'spinner' : ''} />
           </button>
           <button
             type="button"
@@ -385,21 +473,33 @@ export default function App() {
             onClick={handleLogout}
             aria-label="تسجيل الخروج"
           >
-            <LogOut size={16} />
+            <LogOut size={15} />
           </button>
         </div>
       </header>
 
       {/* Desktop Right Sidebar (RTL) */}
       <aside className="glass-panel desktop-rail" aria-label="التنقل الرئيسي">
-        <div className="brand-mark" style={{ padding: '2px 6px' }}>
-          <div className="brand-icon">
-            <Sparkles size={21} />
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '2px 4px' }}>
+          <div className="brand-mark">
+            <div className="brand-icon">
+              <Sparkles size={20} />
+            </div>
+            <div>
+              <div className="brand-title">Glassyfi</div>
+              <div className="brand-subtitle">لوحة التحكم v3</div>
+            </div>
           </div>
-          <div>
-            <div className="brand-title">Glassyfi</div>
-            <div className="brand-subtitle">Obsidian Admin v2</div>
-          </div>
+        </div>
+
+        <div style={{ marginTop: 12, padding: '0 4px' }}>
+          <span
+            className={`live-pill${realtimeStatus === 'live' ? '' : ' connecting'}`}
+            style={{ width: '100%', justifyContent: 'center' }}
+          >
+            <span className="live-pulse-dot" />
+            {realtimeStatus === 'live' ? 'مباشر (Live) • Realtime' : 'جاري الاتصال بـ Realtime...'}
+          </span>
         </div>
 
         <nav className="rail-nav">
@@ -434,11 +534,8 @@ export default function App() {
 
         <div className="rail-footer">
           <div className="sync-status-card">
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, color: 'var(--emerald)' }}>
-              <span className="live-dot" />
-              مزامنة فورية مفعّلة
-            </span>
-            <span className="mono" style={{ color: 'var(--text-secondary)' }}>
+            <span style={{ color: 'var(--text-secondary)' }}>نسخة الإعدادات</span>
+            <span className="mono" style={{ fontWeight: 700, color: '#ffffff' }}>
               rev #{appConfig?.config_revision ?? 1}
             </span>
           </div>
@@ -483,6 +580,7 @@ export default function App() {
             userFeedback={userFeedback}
             labApplications={labApplications}
             appConfig={appConfig}
+            realtimeStatus={realtimeStatus}
             onNavigate={handleSelectTab}
             notify={notify}
           />
@@ -511,6 +609,7 @@ export default function App() {
             promoCodes={promoCodes}
             widgets={widgets}
             depthTools={depthTools}
+            appConfig={appConfig}
             loading={dataLoading}
             onRefresh={fetchAllData}
             notify={notify}
@@ -537,6 +636,7 @@ export default function App() {
           <NotificationsTab
             pushHistory={pushHistory}
             popups={popups}
+            users={users}
             onRefresh={fetchAllData}
             notify={notify}
           />

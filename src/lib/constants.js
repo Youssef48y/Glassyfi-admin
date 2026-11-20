@@ -29,6 +29,7 @@ export const DEEP_LINK_PRESETS = [
   { value: 'glassyfi://settings', label: 'الإعدادات — glassyfi://settings' },
   { value: 'glassyfi://pro', label: 'شاشة الاشتراك Pro — glassyfi://pro' },
   { value: 'glassyfi://lab', label: 'مختبر Vitrify — glassyfi://lab' },
+  { value: 'vitrify://updates', label: 'صفحة التحديثات — vitrify://updates' },
   { value: '__custom__', label: 'رابط مخصص (خلفية محددة أو رابط خارجي)' },
 ];
 

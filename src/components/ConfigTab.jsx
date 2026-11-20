@@ -21,11 +21,17 @@ import {
   ChevronUp,
   ChevronDown,
   X,
+  DownloadCloud,
+  Bell,
 } from 'lucide-react';
 import { supabase, triggerSilentSync } from '../lib/supabase';
 import { formatDateAr } from '../lib/formatters';
+import { formatFileSize } from '../lib/imageUtils';
 import { ToggleSwitch } from './ToggleSwitch';
 import { ConfirmDialog } from './ConfirmDialog';
+
+const GITHUB_LATEST_RELEASE_URL =
+  'https://api.github.com/repos/Youssef48y/Glassyfi/releases/latest';
 
 const DEFAULT_CONFIG = {
   latest_version_code: 1,
@@ -66,6 +72,11 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
   const [form, setForm] = useState(DEFAULT_CONFIG);
   const [initialTerms, setInitialTerms] = useState('');
   const [saving, setSaving] = useState(false);
+
+  // Smart GitHub Releases Fetch & Auto-Push on Save
+  const [fetchingRelease, setFetchingRelease] = useState(false);
+  const [fetchedReleaseInfo, setFetchedReleaseInfo] = useState(null);
+  const [sendPushOnSave, setSendPushOnSave] = useState(false);
 
   // FAQ state
   const [faqForm, setFaqForm] = useState(EMPTY_FAQ);
@@ -108,6 +119,65 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
     }
   }, [config]);
 
+  async function handleFetchLatestGithubRelease() {
+    setFetchingRelease(true);
+    try {
+      const res = await fetch(GITHUB_LATEST_RELEASE_URL, {
+        headers: { Accept: 'application/vnd.github+json' },
+      });
+
+      if (res.status === 404) {
+        notify('لا يوجد إصدار منشور (Release) على GitHub حتى الآن', 'error');
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(`GitHub API HTTP ${res.status}`);
+      }
+
+      const release = await res.json();
+      const assets = Array.isArray(release.assets) ? release.assets : [];
+      const apkAsset = assets.find((a) =>
+        String(a?.name || '').toLowerCase().endsWith('.apk'),
+      );
+
+      const rawTag = String(release.tag_name || '').trim();
+      const cleanedVersion = rawTag.replace(/^v/i, '').trim();
+
+      if (!apkAsset?.browser_download_url) {
+        if (cleanedVersion) {
+          setForm((p) => ({ ...p, latest_version_name: cleanedVersion }));
+        }
+        notify(
+          `تم العثور على الإصدار ${rawTag || 'الأحدث'} لكن لا يوجد ملف .apk مرفق به`,
+          'error',
+        );
+        return;
+      }
+
+      const sizeText = formatFileSize(apkAsset.size);
+      setForm((p) => ({
+        ...p,
+        update_url: apkAsset.browser_download_url,
+        latest_version_name: cleanedVersion || p.latest_version_name,
+      }));
+      setFetchedReleaseInfo({
+        tag: rawTag,
+        version: cleanedVersion,
+        name: apkAsset.name,
+        size: sizeText,
+      });
+
+      notify(
+        `تم جلب الإصدار ${cleanedVersion || rawTag}: ${apkAsset.name} (${sizeText})`,
+        'success',
+      );
+    } catch (err) {
+      notify(`تعذر جلب آخر إصدار من GitHub: ${err.message}`, 'error');
+    } finally {
+      setFetchingRelease(false);
+    }
+  }
+
   async function handleSaveConfig(e) {
     e.preventDefault();
     setSaving(true);
@@ -149,8 +219,43 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
 
       if (error) throw error;
 
-      triggerSilentSync({ topic: 'all_users' });
-      notify('تم حفظ الإعدادات وإرسال نبضة التحديث الفوري لجميع التطبيقات', 'success');
+      if (subTab === 'update' && sendPushOnSave) {
+        const pushTitle = `تحديث جديد لـ Vitrify ${payload.latest_version_name} متاح الآن ✨`;
+        const pushBody =
+          payload.update_changelog_ar ||
+          'اضغط لتنزيل وتثبيت التحديث الجديد مباشرة.';
+
+        const { data: pushRes, error: pushErr } = await supabase.functions.invoke(
+          'send-push',
+          {
+            body: {
+              topic: 'all_users',
+              title: pushTitle,
+              body: pushBody,
+              deep_link: 'vitrify://updates',
+              also_silent_sync: true,
+            },
+          },
+        );
+
+        if (pushErr || !pushRes?.ok) {
+          triggerSilentSync({ topic: 'all_users' });
+          notify(
+            `تم حفظ الإعدادات لكن تعذر إرسال إشعار التحديث: ${pushErr?.message || pushRes?.details || pushRes?.error || 'خطأ غير معروف'}`,
+            'error',
+          );
+        } else {
+          setSendPushOnSave(false);
+          notify(
+            `تم حفظ الإعدادات وإرسال إشعار التحديث (${payload.latest_version_name}) لجميع المستخدمين ✨`,
+            'success',
+          );
+        }
+      } else {
+        triggerSilentSync({ topic: 'all_users' });
+        notify('تم حفظ الإعدادات وإرسال نبضة التحديث الفوري لجميع التطبيقات', 'success');
+      }
+
       await onRefresh();
     } catch (err) {
       notify(`تعذر حفظ الإعدادات: ${err.message}`, 'error');
@@ -315,15 +420,47 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
       ) : subTab === 'update' ? (
         <form onSubmit={handleSaveConfig}>
           <div className="glass-panel section-card">
-            <h2 className="section-heading">
+            <div className="section-heading">
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                 <Rocket size={18} />
                 إعدادات التحديث التلقائي
               </span>
-              {form.is_force_update && (
-                <span className="badge badge-rose">تحديث إجباري مفعّل</span>
-              )}
-            </h2>
+
+              <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
+                {form.is_force_update && (
+                  <span className="badge badge-rose">تحديث إجباري مفعّل</span>
+                )}
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  disabled={fetchingRelease}
+                  onClick={handleFetchLatestGithubRelease}
+                >
+                  {fetchingRelease ? (
+                    <>
+                      <Loader2 size={14} className="spinner" />
+                      جاري الجلب من GitHub...
+                    </>
+                  ) : (
+                    <>
+                      <DownloadCloud size={14} />
+                      جلب آخر إصدار من GitHub
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {fetchedReleaseInfo && (
+              <div className="alert-banner alert-emerald" style={{ marginBottom: 14 }}>
+                <DownloadCloud size={16} style={{ flexShrink: 0, marginTop: 2 }} />
+                <span>
+                  تم الجلب من GitHub ({fetchedReleaseInfo.tag}):{' '}
+                  <strong className="mono">{fetchedReleaseInfo.name}</strong> • الحجم:{' '}
+                  <strong className="mono">{fetchedReleaseInfo.size}</strong>
+                </span>
+              </div>
+            )}
 
             <div className="form-grid cols-3" style={{ marginBottom: 15 }}>
               <div className="field">
@@ -426,22 +563,43 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
               />
             </div>
 
-            <div className="switch-row">
-              <div className="switch-meta">
-                <span className="switch-title">
-                  <ShieldAlert size={16} color="var(--rose)" />
-                  تحديث إجباري (Force Update)
-                </span>
-                <span className="switch-desc">
-                  يمنع المستخدم من تجاوز نافذة التحديث قبل تنزيل الإصدار الجديد
-                </span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div className="switch-row">
+                <div className="switch-meta">
+                  <span className="switch-title">
+                    <ShieldAlert size={16} color="var(--rose)" />
+                    تحديث إجباري (Force Update)
+                  </span>
+                  <span className="switch-desc">
+                    يمنع المستخدم من تجاوز نافذة التحديث قبل تنزيل الإصدار الجديد
+                  </span>
+                </div>
+                <ToggleSwitch
+                  checked={form.is_force_update}
+                  tone="rose"
+                  onChange={(v) => setForm((p) => ({ ...p, is_force_update: v }))}
+                  ariaLabel="تفعيل التحديث الإجباري"
+                />
               </div>
-              <ToggleSwitch
-                checked={form.is_force_update}
-                tone="rose"
-                onChange={(v) => setForm((p) => ({ ...p, is_force_update: v }))}
-                ariaLabel="تفعيل التحديث الإجباري"
-              />
+
+              <div className="switch-row">
+                <div className="switch-meta">
+                  <span className="switch-title">
+                    <Bell size={16} color={sendPushOnSave ? 'var(--emerald)' : 'var(--text-secondary)'} />
+                    إرسال إشعار فوري للجميع بالتحديث الجديد عند الحفظ
+                  </span>
+                  <span className="switch-desc">
+                    يرسل إشعار FCM تلقائياً لـ <span className="mono">all_users</span> مع توجيه مباشر إلى{' '}
+                    <span className="mono">vitrify://updates</span>
+                  </span>
+                </div>
+                <ToggleSwitch
+                  checked={sendPushOnSave}
+                  tone="emerald"
+                  onChange={setSendPushOnSave}
+                  ariaLabel="إرسال إشعار فوري للجميع بالتحديث الجديد عند الحفظ"
+                />
+              </div>
             </div>
           </div>
 

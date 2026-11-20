@@ -306,9 +306,9 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    if (rawDeepLink && !/^(glassyfi|https?):\/\/.+/i.test(rawDeepLink)) {
+    if (rawDeepLink && !/^(glassyfi|vitrify|https?):\/\/.+/i.test(rawDeepLink)) {
       return jsonResponse(
-        { ok: false, error: "deep_link must start with glassyfi://, http://, or https://" },
+        { ok: false, error: "deep_link must start with vitrify://, glassyfi://, http://, or https://" },
         400,
       );
     }

@@ -40,6 +40,15 @@ function parseVersionCode(body) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function buildDefaultTelegramCaption(versionName, changelogAr) {
+  const ver = String(versionName || '1.0.0').trim().replace(/^v/i, '') || '1.0.0';
+  const notes = String(changelogAr || '').trim();
+  return [
+    `✨ تحديث Vitrify الجديد v${ver}`,
+    notes ? `\nما الجديد:\n${notes}` : '\nثبّت ملف الـ APK المرفق للحصول على أحدث المزايا والتحسينات.',
+  ].join('\n');
+}
+
 const DEFAULT_CONFIG = {
   latest_version_code: 1,
   latest_version_name: '1.0.0',
@@ -55,6 +64,8 @@ const DEFAULT_CONFIG = {
   whatsapp_visible: true,
   telegram_url: '',
   telegram_visible: true,
+  telegram_channel_id: '@VitrifyApp',
+  telegram_group_id: '@Vitrify_chat',
   terms_ar: 'مرحباً بك في Vitrify...',
   terms_updated_at: null,
   welcome_enabled: true,
@@ -85,6 +96,14 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
   const [fetchedReleaseInfo, setFetchedReleaseInfo] = useState(null);
   const [sendPushOnSave, setSendPushOnSave] = useState(false);
 
+  // Telegram APK Publisher state
+  const [tgTarget, setTgTarget] = useState('channel'); // 'channel' | 'group' | 'both'
+  const [tgCaption, setTgCaption] = useState(
+    buildDefaultTelegramCaption('1.0.0', ''),
+  );
+  const [tgCaptionTouched, setTgCaptionTouched] = useState(false);
+  const [publishingTelegram, setPublishingTelegram] = useState(false);
+
   // FAQ state
   const [faqForm, setFaqForm] = useState(EMPTY_FAQ);
   const [faqSaving, setFaqSaving] = useState(false);
@@ -95,14 +114,16 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
   useEffect(() => {
     if (config) {
       const termsVal = config.terms_ar ?? 'مرحباً بك في Vitrify...';
+      const vName = config.latest_version_name ?? '1.0.0';
+      const vLog = config.update_changelog_ar ?? '';
       setInitialTerms(termsVal);
       setForm({
         latest_version_code: config.latest_version_code ?? 1,
-        latest_version_name: config.latest_version_name ?? '1.0.0',
+        latest_version_name: vName,
         min_supported_version_code: config.min_supported_version_code ?? 1,
         is_force_update: Boolean(config.is_force_update),
         update_url: config.update_url ?? '',
-        update_changelog_ar: config.update_changelog_ar ?? '',
+        update_changelog_ar: vLog,
         maintenance_mode: Boolean(config.maintenance_mode),
         maintenance_message_ar: config.maintenance_message_ar ?? '',
         instagram_url: config.instagram_url ?? '',
@@ -111,6 +132,8 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
         whatsapp_visible: config.whatsapp_visible ?? true,
         telegram_url: config.telegram_url ?? '',
         telegram_visible: config.telegram_visible ?? true,
+        telegram_channel_id: config.telegram_channel_id || '@VitrifyApp',
+        telegram_group_id: config.telegram_group_id || '@Vitrify_chat',
         terms_ar: termsVal,
         terms_updated_at: config.terms_updated_at ?? null,
         welcome_enabled: config.welcome_enabled ?? true,
@@ -125,6 +148,18 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
       });
     }
   }, [config]);
+
+  // Auto-sync Telegram caption with version name & changelog unless manually customized
+  useEffect(() => {
+    if (!tgCaptionTouched) {
+      setTgCaption(
+        buildDefaultTelegramCaption(
+          form.latest_version_name,
+          form.update_changelog_ar,
+        ),
+      );
+    }
+  }, [form.latest_version_name, form.update_changelog_ar, tgCaptionTouched]);
 
   async function handleFetchLatestGithubRelease() {
     setFetchingRelease(true);
@@ -236,6 +271,8 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
         whatsapp_visible: Boolean(form.whatsapp_visible),
         telegram_url: form.telegram_url.trim(),
         telegram_visible: Boolean(form.telegram_visible),
+        telegram_channel_id: form.telegram_channel_id.trim() || '@VitrifyApp',
+        telegram_group_id: form.telegram_group_id.trim() || '@Vitrify_chat',
         terms_ar: cleanTerms,
         ...(termsChanged ? { terms_updated_at: new Date().toISOString() } : {}),
         welcome_enabled: Boolean(form.welcome_enabled),
@@ -293,6 +330,71 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
       notify(`تعذر حفظ الإعدادات: ${err.message}`, 'error');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handlePublishTelegram() {
+    const apkUrl = form.update_url.trim();
+    if (!apkUrl || !/^https?:\/\/.+/i.test(apkUrl)) {
+      notify('يرجى إدخال أو جلب رابط تحميل الـ APK المباشر (update_url) أولاً', 'error');
+      return;
+    }
+
+    const channelId = form.telegram_channel_id.trim() || '@VitrifyApp';
+    const groupId = form.telegram_group_id.trim() || '@Vitrify_chat';
+    const versionName = form.latest_version_name.trim() || '1.0.0';
+
+    setPublishingTelegram(true);
+    try {
+      // Persist channel_id & group_id to app_config so they stay saved
+      await supabase
+        .from('app_config')
+        .update({
+          telegram_channel_id: channelId,
+          telegram_group_id: groupId,
+        })
+        .eq('id', 1);
+
+      const { data, error } = await supabase.functions.invoke('publish-telegram', {
+        body: {
+          target: tgTarget,
+          apk_url: apkUrl,
+          version_name: versionName,
+          caption: tgCaption.trim(),
+          channel_id: channelId,
+          group_id: groupId,
+        },
+      });
+
+      if (error) {
+        throw new Error(error.message || 'تعذر استدعاء دالة النشر على تيليجرام');
+      }
+      if (!data?.ok) {
+        throw new Error(data?.error || 'فشل إرسال ملف الـ APK إلى تيليجرام');
+      }
+
+      const sentTargets = Array.isArray(data.results)
+        ? data.results.filter((r) => r.ok).map((r) => r.chat_id)
+        : [];
+      const failedTargets = Array.isArray(data.results)
+        ? data.results.filter((r) => !r.ok)
+        : [];
+
+      if (failedTargets.length > 0) {
+        notify(
+          `تم الإرسال إلى (${sentTargets.join(' ، ')}) وتعذر الإرسال إلى: ${failedTargets.map((f) => `${f.chat_id} (${f.error})`).join(' | ')}`,
+          'error',
+        );
+      } else {
+        notify(
+          `تم رفع وإرسال ${data.fileName || 'الـ APK'} إلى تيليجرام بنجاح (${sentTargets.join(' ، ')}) ✈️`,
+          'success',
+        );
+      }
+    } catch (err) {
+      notify(`خطأ في النشر على تيليجرام: ${err.message}`, 'error');
+    } finally {
+      setPublishingTelegram(false);
     }
   }
 
@@ -636,6 +738,128 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
                   ariaLabel="إرسال إشعار فوري للجميع بالتحديث الجديد عند الحفظ"
                 />
               </div>
+            </div>
+          </div>
+
+          {/* Telegram APK Publisher Card */}
+          <div className="glass-panel section-card">
+            <div className="section-heading">
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                <Send size={18} color="var(--sky)" />
+                النشر على تيليجرام (Telegram Publisher)
+              </span>
+              <span className="badge badge-sky mono">
+                Vitrify-v{(form.latest_version_name || '1.0.0').replace(/^v/i, '')}-release.apk
+              </span>
+            </div>
+
+            <div className="form-grid cols-2" style={{ marginBottom: 14 }}>
+              <div className="field">
+                <label className="field-label" htmlFor="cfg-tg-channel">
+                  معرّف القناة (Channel ID)
+                </label>
+                <input
+                  id="cfg-tg-channel"
+                  className="input mono"
+                  placeholder="@VitrifyApp"
+                  value={form.telegram_channel_id}
+                  onChange={(e) =>
+                    setForm((p) => ({ ...p, telegram_channel_id: e.target.value }))
+                  }
+                />
+              </div>
+
+              <div className="field">
+                <label className="field-label" htmlFor="cfg-tg-group">
+                  معرّف الجروب (Group ID)
+                </label>
+                <input
+                  id="cfg-tg-group"
+                  className="input mono"
+                  placeholder="@Vitrify_chat"
+                  value={form.telegram_group_id}
+                  onChange={(e) =>
+                    setForm((p) => ({ ...p, telegram_group_id: e.target.value }))
+                  }
+                />
+              </div>
+            </div>
+
+            <div className="field" style={{ marginBottom: 14 }}>
+              <span className="field-label">وجهة النشر على تيليجرام</span>
+              <div className="segmented">
+                {[
+                  { id: 'channel', label: 'القناة فقط' },
+                  { id: 'group', label: 'الجروب فقط' },
+                  { id: 'both', label: 'القناة والجروب معاً' },
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    className={`segmented-btn${tgTarget === opt.id ? ' active' : ''}`}
+                    onClick={() => setTgTarget(opt.id)}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="field" style={{ marginBottom: 15 }}>
+              <div className="field-label">
+                <label htmlFor="cfg-tg-caption">
+                  نص المنشور المرفق مع ملف الـ APK (Caption)
+                </label>
+                {tgCaptionTouched && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    style={{ padding: '3px 8px', fontSize: '0.73rem' }}
+                    onClick={() => {
+                      setTgCaptionTouched(false);
+                      setTgCaption(
+                        buildDefaultTelegramCaption(
+                          form.latest_version_name,
+                          form.update_changelog_ar,
+                        ),
+                      );
+                    }}
+                  >
+                    استعادة النص التلقائي
+                  </button>
+                )}
+              </div>
+              <textarea
+                id="cfg-tg-caption"
+                className="textarea"
+                style={{ minHeight: 96 }}
+                value={tgCaption}
+                onChange={(e) => {
+                  setTgCaptionTouched(true);
+                  setTgCaption(e.target.value);
+                }}
+              />
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={publishingTelegram || !form.update_url.trim()}
+                onClick={handlePublishTelegram}
+              >
+                {publishingTelegram ? (
+                  <>
+                    <Loader2 size={16} className="spinner" />
+                    جاري سحب الـ APK ورفعه إلى تيليجرام...
+                  </>
+                ) : (
+                  <>
+                    <Send size={16} />
+                    إرسال الـ APK إلى تيليجرام الآن ✈️
+                  </>
+                )}
+              </button>
             </div>
           </div>
 

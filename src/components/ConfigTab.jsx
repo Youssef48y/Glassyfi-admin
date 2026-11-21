@@ -25,20 +25,15 @@ import {
   Bell,
   Package,
   Image as ImageIcon,
-  Upload,
   Pin,
   Link2,
 } from 'lucide-react';
-import { supabase, triggerSilentSync, WALLPAPERS_BUCKET } from '../lib/supabase';
+import { supabase, triggerSilentSync } from '../lib/supabase';
 import { formatDateAr } from '../lib/formatters';
-import {
-  formatFileSize,
-  validateImageFile,
-  getExtensionFromFile,
-  generateUniqueId,
-} from '../lib/imageUtils';
+import { formatFileSize } from '../lib/imageUtils';
 import { ToggleSwitch } from './ToggleSwitch';
 import { ConfirmDialog } from './ConfirmDialog';
+import { LosslessImagePickerField } from './LosslessImagePickerField';
 
 const GITHUB_RELEASES_URL =
   'https://api.github.com/repos/Youssef48y/glassyfi-apk/releases?per_page=10';
@@ -171,7 +166,6 @@ export function ConfigTab({
   const [tgApkFilename, setTgApkFilename] = useState('');
   const [tgFilenameTouched, setTgFilenameTouched] = useState(false);
   const [tgPhotoUrl, setTgPhotoUrl] = useState('');
-  const [tgPhotoPreviewError, setTgPhotoPreviewError] = useState(false);
   const [tgUploadingPhoto, setTgUploadingPhoto] = useState(false);
   const [tgButtonText, setTgButtonText] = useState('');
   const [tgButtonUrl, setTgButtonUrl] = useState('');
@@ -260,10 +254,6 @@ export function ConfigTab({
       setTgApkFilename(buildDefaultApkFilename(form.latest_version_name));
     }
   }, [form.latest_version_name, tgFilenameTouched]);
-
-  useEffect(() => {
-    setTgPhotoPreviewError(false);
-  }, [tgPhotoUrl]);
 
   async function handleFetchLatestGithubRelease() {
     setFetchingRelease(true);
@@ -478,77 +468,6 @@ export function ConfigTab({
     }
     if (templateKey === 'wallpaper') {
       setTgCaption(buildNewWallpaperTemplateCaption());
-    }
-  }
-
-  async function handleUploadTelegramPhoto(e) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    try {
-      const normalizedType =
-        file.type === 'image/jpg' ? 'image/jpeg' : file.type;
-      const ext = getExtensionFromFile(file);
-      const isAllowedByExt = ['jpg', 'jpeg', 'png', 'webp'].includes(ext);
-
-      if (normalizedType) {
-        const validationErr = validateImageFile(
-          normalizedType === file.type
-            ? file
-            : { type: normalizedType, size: file.size, name: file.name },
-        );
-        if (validationErr) {
-          notify(validationErr, 'error');
-          return;
-        }
-      } else if (!isAllowedByExt) {
-        notify('الصيغة غير مدعومة. الصيغ المسموحة: JPG, PNG, WebP', 'error');
-        return;
-      }
-
-      if (file.size > 10 * 1024 * 1024) {
-        notify('حجم الصورة يتجاوز حد تيليجرام المباشر للصور (10 ميجابايت)', 'error');
-        return;
-      }
-
-      const contentType =
-        normalizedType ||
-        (ext === 'png'
-          ? 'image/png'
-          : ext === 'webp'
-            ? 'image/webp'
-            : 'image/jpeg');
-
-      setTgUploadingPhoto(true);
-      const storagePath = `telegram-uploads/${generateUniqueId()}.${ext}`;
-      const { error: uploadError } = await supabase.storage
-        .from(WALLPAPERS_BUCKET)
-        .upload(storagePath, file, {
-          contentType,
-          cacheControl: '3600',
-          upsert: true,
-        });
-
-      if (uploadError) {
-        throw new Error(uploadError.message || 'فشل رفع الصورة إلى التخزين السحابي');
-      }
-
-      const { data: urlData } = supabase.storage
-        .from(WALLPAPERS_BUCKET)
-        .getPublicUrl(storagePath);
-
-      if (!urlData?.publicUrl) {
-        throw new Error('تعذر استخراج الرابط العام للصورة المرفوعة');
-      }
-
-      setTgPhotoUrl(urlData.publicUrl);
-      setTgPhotoPreviewError(false);
-      notify('تم رفع الصورة بنجاح وأصبحت جاهزة للنشر على تيليجرام 🖼️', 'success');
-    } catch (err) {
-      notify(`تعذر رفع الصورة: ${err.message}`, 'error');
-    } finally {
-      setTgUploadingPhoto(false);
-      e.target.value = '';
     }
   }
 
@@ -1187,60 +1106,25 @@ export function ConfigTab({
               </div>
             )}
 
-            {/* Photo URL / Upload / Existing Wallpaper Picker (Photo + Post Mode) */}
+            {/* Photo URL / Lossless Gallery Upload / Existing Wallpaper Picker (Photo + Post Mode) */}
             {tgMode === 'photo' && (
-              <div className="glass-subcard" style={{ padding: 14, marginBottom: 14 }}>
-                <div className="field" style={{ marginBottom: 10 }}>
-                  <div className="field-label">
-                    <label htmlFor="cfg-tg-photo-url">رابط الصورة أو رفع صورة من الجهاز</label>
-                    <label
-                      className="btn btn-secondary btn-sm"
-                      style={{ cursor: tgUploadingPhoto ? 'wait' : 'pointer' }}
-                    >
-                      <input
-                        type="file"
-                        accept="image/*"
-                        style={{ display: 'none' }}
-                        disabled={tgUploadingPhoto}
-                        onChange={handleUploadTelegramPhoto}
-                      />
-                      {tgUploadingPhoto ? (
-                        <>
-                          <Loader2 size={13} className="spinner" /> جاري الرفع...
-                        </>
-                      ) : (
-                        <>
-                          <Upload size={13} /> رفع صورة من الجهاز
-                        </>
-                      )}
-                    </label>
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <input
-                      id="cfg-tg-photo-url"
-                      type="text"
-                      inputMode="url"
-                      className="input ltr"
-                      placeholder="https://example.com/photo.jpg"
-                      value={tgPhotoUrl}
-                      onChange={(e) => setTgPhotoUrl(e.target.value)}
-                    />
-                    {tgPhotoUrl.trim() && (
-                      <button
-                        type="button"
-                        className="btn btn-ghost btn-icon"
-                        onClick={() => setTgPhotoUrl('')}
-                        title="مسح رابط الصورة"
-                        aria-label="مسح رابط الصورة"
-                      >
-                        <X size={15} />
-                      </button>
-                    )}
-                  </div>
-                </div>
+              <div className="glass-subcard" style={{ padding: 14, marginBottom: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <LosslessImagePickerField
+                  id="cfg-tg-photo-url"
+                  label="رابط الصورة أو اختيار من المعرض"
+                  hint="(بدون ضغط — حد تيليجرام 10MB)"
+                  value={tgPhotoUrl}
+                  onChange={setTgPhotoUrl}
+                  notify={notify}
+                  disabled={publishingTelegram}
+                  placeholder="https://example.com/photo.jpg"
+                  maxBytes={10 * 1024 * 1024}
+                  onUploadingChange={setTgUploadingPhoto}
+                  previewMaxHeight={170}
+                />
 
                 {cloudWallpapers.length > 0 && (
-                  <div className="field" style={{ marginBottom: tgPhotoUrl.trim() ? 10 : 0 }}>
+                  <div className="field">
                     <label className="field-label" htmlFor="cfg-tg-wp-pick">
                       أو اختر من خلفيات التطبيق الحالية
                     </label>
@@ -1264,16 +1148,6 @@ export function ConfigTab({
                       ))}
                     </select>
                   </div>
-                )}
-
-                {tgPhotoUrl.trim() && !tgPhotoPreviewError && (
-                  <img
-                    src={tgPhotoUrl.trim()}
-                    alt="معاينة صورة المنشور"
-                    className="push-preview-img"
-                    style={{ maxHeight: 170 }}
-                    onError={() => setTgPhotoPreviewError(true)}
-                  />
                 )}
               </div>
             )}
@@ -1626,19 +1500,16 @@ export function ConfigTab({
               />
             </div>
 
-            <div className="field">
-              <label className="field-label" htmlFor="wel-img">
-                رابط صورة الترحيب <span className="field-hint">(اختياري)</span>
-              </label>
-              <input
-                id="wel-img"
-                type="url"
-                className="input ltr"
-                placeholder="https://..."
-                value={form.welcome_image_url}
-                onChange={(e) => setForm((p) => ({ ...p, welcome_image_url: e.target.value }))}
-              />
-            </div>
+            <LosslessImagePickerField
+              id="wel-img"
+              label="صورة الرسالة الترحيبية"
+              hint="(اختياري — بدون ضغط)"
+              value={form.welcome_image_url}
+              onChange={(url) => setForm((p) => ({ ...p, welcome_image_url: url }))}
+              notify={notify}
+              disabled={saving}
+              previewMaxHeight={160}
+            />
           </div>
 
           {/* 3. Terms & Conditions */}

@@ -28,11 +28,19 @@ import {
   MessageSquareMore,
   ArrowUpCircle,
   Save,
+  Activity,
+  Bug,
+  Cpu,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { supabase, triggerSilentSync } from '../lib/supabase';
 import {
+  formatDateAr,
   formatRelativeTimeAr,
   formatShortDateAr,
+  formatAndroidVersion,
   generateRandomPromoCode,
   getProStatusInfo,
   computeDurationSpec,
@@ -40,12 +48,13 @@ import {
   isUserOnline,
   computeExpirySpec,
 } from '../lib/formatters';
-import { ROLE_META, MAX_SHOWS_OPTIONS } from '../lib/constants';
+import { ROLE_META, MAX_SHOWS_OPTIONS, getScreenLabelAr } from '../lib/constants';
 import { ToggleSwitch } from './ToggleSwitch';
 import { ConfirmDialog } from './ConfirmDialog';
 import { DeepLinkPicker } from './DeepLinkPicker';
 import { DurationPicker } from './DurationPicker';
 import { ExpiryPicker } from './ExpiryPicker';
+import { LosslessImagePickerField } from './LosslessImagePickerField';
 
 export function UsersTab({
   users,
@@ -53,6 +62,8 @@ export function UsersTab({
   widgets,
   depthTools,
   appConfig,
+  analyticsEvents = [],
+  appErrors = [],
   loading,
   onRefresh,
   notify,
@@ -75,6 +86,12 @@ export function UsersTab({
   const [unlockDraft, setUnlockDraft] = useState([]);
   const [unlockDirty, setUnlockDirty] = useState(false);
 
+  // Per-user live activity timeline & errors in drawer
+  const [drawerEvents, setDrawerEvents] = useState([]);
+  const [drawerErrors, setDrawerErrors] = useState([]);
+  const [drawerActivityLoading, setDrawerActivityLoading] = useState(false);
+  const [expandedUserErrorId, setExpandedUserErrorId] = useState('');
+
   // Direct Push form inside drawer
   const [directTitle, setDirectTitle] = useState('');
   const [directBody, setDirectBody] = useState('');
@@ -93,12 +110,53 @@ export function UsersTab({
   const [tpExpiry, setTpExpiry] = useState({ amount: 0, unit: 'never' });
   const [sendingPopup, setSendingPopup] = useState(false);
 
-  // Live clock tick so "متصل الآن" (<= 65s) updates smoothly without reload
+  // Live 5-second clock ticker so exact online presence (<= 45s) updates automatically
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNowMs(Date.now()), 5000);
     return () => clearInterval(timer);
   }, []);
+
+  // Load fresh per-user analytics_events & app_errors when drawer opens or realtime updates
+  useEffect(() => {
+    if (!selectedDeviceId) {
+      setDrawerEvents([]);
+      setDrawerErrors([]);
+      setExpandedUserErrorId('');
+      return undefined;
+    }
+
+    let cancelled = false;
+    setDrawerActivityLoading(true);
+
+    Promise.all([
+      supabase
+        .from('analytics_events')
+        .select('*')
+        .eq('device_id', selectedDeviceId)
+        .order('created_at', { ascending: false })
+        .limit(40),
+      supabase
+        .from('app_errors')
+        .select('*')
+        .eq('device_id', selectedDeviceId)
+        .order('created_at', { ascending: false })
+        .limit(30),
+    ])
+      .then(([evRes, errRes]) => {
+        if (cancelled) return;
+        if (Array.isArray(evRes.data)) setDrawerEvents(evRes.data);
+        if (Array.isArray(errRes.data)) setDrawerErrors(errRes.data);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setDrawerActivityLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDeviceId, analyticsEvents, appErrors]);
 
   // Promo code form (flexible minutes/hours/days/lifetime)
   const [promoCodeInput, setPromoCodeInput] = useState('');
@@ -573,6 +631,38 @@ export function UsersTab({
     }
   }
 
+  async function handleToggleUserErrorResolved(errRow) {
+    try {
+      const nextResolved = !errRow.resolved;
+      const { error } = await supabase
+        .from('app_errors')
+        .update({ resolved: nextResolved })
+        .eq('id', errRow.id);
+      if (error) throw error;
+      setDrawerErrors((prev) =>
+        prev.map((item) =>
+          item.id === errRow.id ? { ...item, resolved: nextResolved } : item,
+        ),
+      );
+      notify(nextResolved ? 'تم تعليم الخطأ كمحلول' : 'تمت إعادة فتح الخطأ', 'success');
+      await onRefresh();
+    } catch (err) {
+      notify(`تعذر تحديث حالة الخطأ: ${err.message}`, 'error');
+    }
+  }
+
+  function formatEventTypeAr(eventType) {
+    const t = String(eventType || '').toLowerCase();
+    if (t === 'screen_view' || t === 'screen' || t === 'tab_view' || t === 'page_view') {
+      return 'زيارة شاشة';
+    }
+    if (t === 'user_action') return 'نشاط';
+    if (t.includes('wallpaper')) return 'خلفية';
+    if (t.includes('widget')) return 'ويدجيت';
+    if (t.includes('depth') || t.includes('tool')) return 'أداة عمق';
+    return eventType || 'حدث';
+  }
+
   const FILTER_PILLS = [
     { id: 'all', label: 'الكل', count: filterCounts.all },
     { id: 'online', label: 'المتصلين الآن', count: filterCounts.online, isOnline: true },
@@ -675,16 +765,28 @@ export function UsersTab({
                 const userVCode = Number(user.app_version_code) || 1;
                 const isOutdated = userVCode < latestVersionCode;
                 const isOnline = isUserOnline(user, nowMs);
+                const androidLabel = formatAndroidVersion(user.android_version) || 'Android —';
+                const userErrorCount = appErrors.filter(
+                  (e) => e.device_id === user.device_id && !e.resolved,
+                ).length;
 
                 return (
-                  <article key={user.device_id} className="glass-panel user-card">
+                  <article
+                    key={user.device_id}
+                    className="glass-panel user-card"
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => openUserDrawer(user)}
+                  >
                     <div className="user-card-top">
                       <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                         <button
                           type="button"
                           className={`star-btn${user.is_starred ? ' starred' : ''}`}
                           disabled={starringId === user.device_id}
-                          onClick={() => handleToggleStar(user)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleToggleStar(user);
+                          }}
                           title={user.is_starred ? 'إزالة من المميزين' : 'تمييز المستخدم (خاص بالإدارة)'}
                           aria-label="تمييز المستخدم"
                         >
@@ -697,7 +799,10 @@ export function UsersTab({
                         <button
                           type="button"
                           className="user-code-btn"
-                          onClick={() => copyText(user.user_code)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            copyText(user.user_code);
+                          }}
                           title="نسخ كود المستخدم"
                         >
                           {copiedCode === user.user_code ? (
@@ -716,6 +821,9 @@ export function UsersTab({
                             متصل الآن
                           </span>
                         )}
+                        <span className="badge badge-neutral mono">
+                          <Cpu size={11} /> {androidLabel}
+                        </span>
                         <span className={`badge ${roleInfo.badgeClass}`}>
                           {user.role === 'dev' ? (
                             <Code2 size={11} />
@@ -739,6 +847,11 @@ export function UsersTab({
                         {isOutdated && (
                           <span className="badge badge-amber">
                             <ArrowUpCircle size={11} /> لم يحدّث
+                          </span>
+                        )}
+                        {userErrorCount > 0 && (
+                          <span className="badge badge-rose">
+                            <Bug size={11} /> {userErrorCount} خطأ
                           </span>
                         )}
                         {user.is_suspicious && (
@@ -767,6 +880,15 @@ export function UsersTab({
                         {formatRelativeTimeAr(user.last_seen_at)}
                       </span>
                     </div>
+
+                    {isOnline && user.current_screen && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                        <span className="badge badge-sky">
+                          <Activity size={11} />
+                          في شاشة {getScreenLabelAr(user.current_screen)} الآن
+                        </span>
+                      </div>
+                    )}
 
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: '0.76rem', color: 'var(--text-muted)' }}>
                       {proInfo.detail && (
@@ -798,15 +920,21 @@ export function UsersTab({
                         type="button"
                         className="btn btn-primary btn-sm"
                         style={{ flex: 1 }}
-                        onClick={() => openUserDrawer(user)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openUserDrawer(user);
+                        }}
                       >
                         <SlidersHorizontal size={14} />
-                        إدارة الجهاز
+                        النشاط والإدارة
                       </button>
                       <button
                         type="button"
                         className="btn btn-secondary btn-sm"
-                        onClick={() => openTargetedPopupModal(user)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openTargetedPopupModal(user);
+                        }}
                       >
                         <MessageSquareMore size={14} />
                         رسالة منبثقة لهذا الشخص
@@ -814,7 +942,10 @@ export function UsersTab({
                       <button
                         type="button"
                         className="btn btn-danger btn-sm"
-                        onClick={() => setDeleteUserTarget(user)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDeleteUserTarget(user);
+                        }}
                         title="حذف الجهاز نهائياً"
                         aria-label={`حذف الجهاز ${user.user_code}`}
                       >
@@ -1037,15 +1168,20 @@ export function UsersTab({
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     <h2 className="mono">{selectedUser.user_code}</h2>
-                    {isUserOnline(selectedUser, nowMs) && (
+                    {isUserOnline(selectedUser, nowMs) ? (
                       <span className="badge badge-emerald">
                         <span className="live-pulse-dot" style={{ width: 7, height: 7 }} />
                         متصل الآن
                       </span>
+                    ) : (
+                      <span className="badge badge-neutral">غير متصل</span>
                     )}
+                    <span className="badge badge-neutral mono">
+                      <Cpu size={11} /> {formatAndroidVersion(selectedUser.android_version) || 'Android —'}
+                    </span>
                   </div>
                   <div style={{ fontSize: '0.77rem', color: 'var(--text-secondary)', marginTop: 2 }}>
-                    {selectedUser.device_model || 'جهاز غير معروف'} • v{selectedUser.app_version || '—'} (#{selectedUser.app_version_code || 1})
+                    {selectedUser.device_model || 'جهاز غير معروف'} • v{selectedUser.app_version || '—'} (#{selectedUser.app_version_code || 1}) • آخر ظهور: {formatRelativeTimeAr(selectedUser.last_seen_at)}
                   </div>
                 </div>
               </div>
@@ -1057,6 +1193,227 @@ export function UsersTab({
               >
                 <X size={18} />
               </button>
+            </div>
+
+            {/* Live Activity & Current Screen Timeline */}
+            <div className="glass-subcard" style={{ padding: 14 }}>
+              <div className="field-label" style={{ marginBottom: 9 }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <Activity size={15} color="var(--sky)" />
+                  النشاط المباشر والسجل الزمني
+                </span>
+                {selectedUser.current_screen ? (
+                  <span
+                    className={`badge ${isUserOnline(selectedUser, nowMs) ? 'badge-emerald' : 'badge-sky'}`}
+                  >
+                    {isUserOnline(selectedUser, nowMs)
+                      ? `في شاشة ${getScreenLabelAr(selectedUser.current_screen)} الآن`
+                      : `آخر شاشة: ${getScreenLabelAr(selectedUser.current_screen)}`}
+                  </span>
+                ) : (
+                  <span className="badge badge-neutral">لا توجد شاشة مسجّلة</span>
+                )}
+              </div>
+
+              {drawerActivityLoading && drawerEvents.length === 0 ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.8rem', color: 'var(--text-muted)', padding: '6px 0' }}>
+                  <Loader2 size={14} className="spinner" /> جاري تحميل سجل النشاط...
+                </div>
+              ) : drawerEvents.length === 0 ? (
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', padding: '4px 0' }}>
+                  لا توجد أحداث نشاط مسجّلة لهذا الجهاز بعد.
+                </div>
+              ) : (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 6,
+                    maxHeight: 200,
+                    overflowY: 'auto',
+                    paddingInlineEnd: 2,
+                  }}
+                >
+                  {drawerEvents.map((ev) => (
+                    <div
+                      key={ev.id}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 8,
+                        padding: '7px 10px',
+                        borderRadius: 9,
+                        background: 'var(--bg-input)',
+                        border: '1px solid var(--glass-border)',
+                        fontSize: '0.78rem',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
+                        <span className="badge badge-neutral" style={{ fontSize: '0.68rem' }}>
+                          {formatEventTypeAr(ev.event_type)}
+                        </span>
+                        <span
+                          style={{
+                            color: 'var(--text-primary)',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                          title={ev.target_name}
+                        >
+                          {getScreenLabelAr(ev.target_name)}
+                        </span>
+                      </div>
+                      <span
+                        style={{
+                          fontSize: '0.7rem',
+                          color: 'var(--text-muted)',
+                          flexShrink: 0,
+                        }}
+                        title={formatDateAr(ev.created_at)}
+                      >
+                        {formatRelativeTimeAr(ev.created_at)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Per-User Logged Crashes & Errors */}
+            <div className="glass-subcard" style={{ padding: 14 }}>
+              <div className="field-label" style={{ marginBottom: 9 }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <Bug size={15} color="var(--rose)" />
+                  أخطاء وانهيارات هذا الجهاز ({drawerErrors.length})
+                </span>
+                {drawerErrors.some((e) => !e.resolved) && (
+                  <span className="badge badge-rose">
+                    {drawerErrors.filter((e) => !e.resolved).length} غير محلول
+                  </span>
+                )}
+              </div>
+
+              {drawerActivityLoading && drawerErrors.length === 0 ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                  <Loader2 size={14} className="spinner" /> جاري فحص سجل الأخطاء...
+                </div>
+              ) : drawerErrors.length === 0 ? (
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                  لا توجد أخطاء أو انهيارات مسجّلة لهذا الجهاز 🎉
+                </div>
+              ) : (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 8,
+                    maxHeight: 240,
+                    overflowY: 'auto',
+                  }}
+                >
+                  {drawerErrors.map((errRow) => {
+                    const isOpen = expandedUserErrorId === errRow.id;
+                    return (
+                      <div
+                        key={errRow.id}
+                        style={{
+                          padding: '9px 10px',
+                          borderRadius: 10,
+                          background: 'var(--bg-input)',
+                          border: '1px solid var(--glass-border)',
+                          opacity: errRow.resolved ? 0.7 : 1,
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'flex-start',
+                            justifyContent: 'space-between',
+                            gap: 8,
+                            marginBottom: 5,
+                          }}
+                        >
+                          <strong style={{ fontSize: '0.8rem', wordBreak: 'break-word' }}>
+                            {errRow.error_title}
+                          </strong>
+                          <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                            <span className={`badge ${errRow.is_fatal ? 'badge-rose' : 'badge-amber'}`}>
+                              {errRow.is_fatal ? 'Fatal' : 'Non-Fatal'}
+                            </span>
+                            {errRow.resolved && (
+                              <span className="badge badge-emerald">تم الحل</span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div
+                          style={{
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: 6,
+                            fontSize: '0.72rem',
+                            color: 'var(--text-muted)',
+                          }}
+                        >
+                          <span>
+                            {errRow.screen_name ? `الشاشة: ${getScreenLabelAr(errRow.screen_name)} • ` : ''}
+                            {formatDateAr(errRow.created_at)}
+                          </span>
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            {errRow.stack_trace && (
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-sm"
+                                style={{ padding: '2px 7px', fontSize: '0.72rem' }}
+                                onClick={() =>
+                                  setExpandedUserErrorId(isOpen ? '' : errRow.id)
+                                }
+                              >
+                                {isOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                                Stack Trace
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              style={{ padding: '2px 7px', fontSize: '0.72rem' }}
+                              onClick={() => handleToggleUserErrorResolved(errRow)}
+                            >
+                              <CheckCircle2 size={12} />
+                              {errRow.resolved ? 'إعادة فتح' : 'تم الحل'}
+                            </button>
+                          </div>
+                        </div>
+
+                        {isOpen && errRow.stack_trace && (
+                          <pre
+                            className="mono ltr"
+                            style={{
+                              marginTop: 8,
+                              marginBottom: 0,
+                              padding: 9,
+                              borderRadius: 8,
+                              background: '#16181c',
+                              color: '#e2e8f0',
+                              fontSize: '0.7rem',
+                              maxHeight: 160,
+                              overflow: 'auto',
+                              whiteSpace: 'pre-wrap',
+                              wordBreak: 'break-word',
+                            }}
+                          >
+                            {errRow.stack_trace}
+                          </pre>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Admin-Only Private Note */}
@@ -1430,17 +1787,16 @@ export function UsersTab({
                 />
               </div>
 
-              <div className="field">
-                <label className="field-label" htmlFor="tp-img">رابط صورة (اختياري)</label>
-                <input
-                  id="tp-img"
-                  type="url"
-                  className="input ltr"
-                  placeholder="https://..."
-                  value={tpImageUrl}
-                  onChange={(e) => setTpImageUrl(e.target.value)}
-                />
-              </div>
+              <LosslessImagePickerField
+                id="tp-img"
+                label="صورة الرسالة المنبثقة"
+                hint="(اختياري — بدون ضغط)"
+                value={tpImageUrl}
+                onChange={setTpImageUrl}
+                notify={notify}
+                disabled={sendingPopup}
+                previewMaxHeight={140}
+              />
 
               <DeepLinkPicker
                 id="tp-deeplink"

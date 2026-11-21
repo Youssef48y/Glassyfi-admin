@@ -54,6 +54,7 @@ const INITIAL_FORM = {
   is_exclusive: false,
   is_pro: false,
   is_active: true,
+  supports_auto_day_night: true,
 };
 
 function isHttpUrl(url) {
@@ -290,6 +291,10 @@ export function WallpapersTab({
         is_exclusive: form.is_exclusive,
         is_pro: form.is_pro,
         is_active: form.is_active,
+        supports_auto_day_night:
+          form.wallpaper_type === 'dual_day_night'
+            ? Boolean(form.supports_auto_day_night)
+            : false,
         is_builtin: false,
         sort_order: Number(form.sort_order) || 0,
       });
@@ -315,17 +320,21 @@ export function WallpapersTab({
   async function handleToggleFlag(wallpaper, field) {
     setBusyCardIds((prev) => ({ ...prev, [wallpaper.id]: true }));
     try {
+      const nextValue = !wallpaper[field];
       const nextState = {
         is_new: wallpaper.is_new,
         is_exclusive: wallpaper.is_exclusive,
         is_pro: wallpaper.is_pro,
         is_active: wallpaper.is_active,
-        [field]: !wallpaper[field],
+        [field]: nextValue,
       };
-      const payload = {
-        [field]: nextState[field],
-        badge_type: deriveBadgeType(nextState),
-      };
+      const payload =
+        field === 'supports_auto_day_night'
+          ? { supports_auto_day_night: nextValue }
+          : {
+              [field]: nextValue,
+              badge_type: deriveBadgeType(nextState),
+            };
 
       const { error } = await supabase
         .from('wallpapers')
@@ -758,6 +767,27 @@ export function WallpapersTab({
                 ariaLabel="ظاهرة"
               />
             </div>
+
+            {form.wallpaper_type === 'dual_day_night' && (
+              <div className="switch-row" style={{ gridColumn: '1 / -1' }}>
+                <div className="switch-meta">
+                  <span className="switch-title">
+                    <Sun size={15} color="var(--amber)" />
+                    <Moon size={14} color="var(--sky)" />
+                    يدعم التبديل التلقائي ليل/نهار
+                  </span>
+                  <span className="switch-desc">
+                    يتيح للتطبيق تبديل الخلفية تلقائياً بين نسخة النهار والليل حسب الوقت أو وضع الهاتف
+                  </span>
+                </div>
+                <ToggleSwitch
+                  checked={Boolean(form.supports_auto_day_night)}
+                  onChange={(v) => setForm((p) => ({ ...p, supports_auto_day_night: v }))}
+                  tone="sky"
+                  ariaLabel="يدعم التبديل التلقائي ليل/نهار"
+                />
+              </div>
+            )}
           </div>
 
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, justifyContent: 'flex-end' }}>
@@ -1036,6 +1066,29 @@ export function WallpapersTab({
                       {wp.is_active ? 'ظاهرة' : 'مخفية'}
                     </button>
                   </div>
+
+                  {isDual && (
+                    <div
+                      className="switch-row"
+                      style={{ padding: '7px 10px', marginTop: 2 }}
+                    >
+                      <span
+                        className="switch-title"
+                        style={{ fontSize: '0.76rem', gap: 5 }}
+                      >
+                        <Sun size={13} color="var(--amber)" />
+                        <Moon size={12} color="var(--sky)" />
+                        يدعم التبديل التلقائي ليل/نهار
+                      </span>
+                      <ToggleSwitch
+                        checked={Boolean(wp.supports_auto_day_night)}
+                        disabled={isBusy}
+                        tone="sky"
+                        onChange={() => handleToggleFlag(wp, 'supports_auto_day_night')}
+                        ariaLabel={`يدعم التبديل التلقائي ليل/نهار لـ ${wp.title_ar}`}
+                      />
+                    </div>
+                  )}
 
                   {/* Audience inline selector */}
                   <div className="audience-mini">

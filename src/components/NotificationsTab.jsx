@@ -15,17 +15,17 @@ import {
   Check,
   Star,
   Clock,
+  ShieldCheck,
 } from 'lucide-react';
 import { supabase, triggerSilentSync } from '../lib/supabase';
 import {
   formatDateAr,
+  getProStatusInfo,
   isUserOnline,
   computeExpirySpec,
   getPopupExpiryInfo,
 } from '../lib/formatters';
 import {
-  PUSH_TOPIC_OPTIONS,
-  POPUP_AUDIENCE_OPTIONS,
   MAX_SHOWS_OPTIONS,
   getTopicLabelAr,
   getAudienceBadge,
@@ -34,17 +34,283 @@ import { ToggleSwitch } from './ToggleSwitch';
 import { ConfirmDialog } from './ConfirmDialog';
 import { DeepLinkPicker } from './DeepLinkPicker';
 import { ExpiryPicker } from './ExpiryPicker';
+import { LosslessImagePickerField } from './LosslessImagePickerField';
+
+const AUDIENCE_FILTER_CHIPS = [
+  { id: 'all', label: 'الكل' },
+  { id: 'online', label: 'المتصلين الآن', isOnline: true },
+  { id: 'pro', label: 'Pro' },
+  { id: 'free', label: 'مجاني' },
+  { id: 'uptodate', label: 'المحدّثين' },
+  { id: 'outdated', label: 'غير المحدّثين' },
+  { id: 'lab', label: 'المختبر' },
+  { id: 'dev', label: 'المطورين' },
+  { id: 'specific', label: 'أشخاص محددين' },
+];
+
+const PURE_TOPIC_MAP = {
+  all: 'all_users',
+  pro: 'pro_users',
+  free: 'free_users',
+  lab: 'lab_users',
+  dev: 'dev_users',
+};
+
+const PURE_POPUP_AUDIENCE_SET = new Set(['all', 'pro', 'free', 'lab', 'dev']);
+
+function matchesAudienceChip(user, chipId, selectedDeviceIds, latestVersionCode, nowMs) {
+  const proActive = getProStatusInfo(user).active;
+  const userVCode = Number(user.app_version_code) || 1;
+  switch (chipId) {
+    case 'all':
+      return true;
+    case 'online':
+      return isUserOnline(user, nowMs);
+    case 'pro':
+      return proActive;
+    case 'free':
+      return !proActive && !user.is_banned;
+    case 'uptodate':
+      return userVCode >= latestVersionCode;
+    case 'outdated':
+      return userVCode < latestVersionCode;
+    case 'lab':
+      return user.role === 'lab';
+    case 'dev':
+      return user.role === 'dev';
+    case 'specific':
+      return selectedDeviceIds.includes(user.device_id);
+    default:
+      return false;
+  }
+}
+
+function toggleFilterList(prevList, chipId) {
+  if (chipId === 'all') return ['all'];
+  const withoutAll = prevList.filter((id) => id !== 'all');
+  const next = withoutAll.includes(chipId)
+    ? withoutAll.filter((id) => id !== chipId)
+    : [...withoutAll, chipId];
+  return next.length === 0 ? ['all'] : next;
+}
+
+function computeAudienceUnion({
+  selectedFilters,
+  selectedDeviceIds,
+  users,
+  latestVersionCode,
+  nowMs,
+}) {
+  const deviceSet = new Set();
+  const tokenSet = new Set();
+  const isAll = selectedFilters.includes('all');
+
+  users.forEach((u) => {
+    if (!u?.device_id) return;
+    const matched = isAll
+      ? true
+      : selectedFilters.some((chipId) =>
+          matchesAudienceChip(u, chipId, selectedDeviceIds, latestVersionCode, nowMs),
+        );
+    if (matched) {
+      deviceSet.add(u.device_id);
+      const token = (u.fcm_token || '').trim();
+      if (token) tokenSet.add(token);
+    }
+  });
+
+  if (!isAll && selectedFilters.includes('specific')) {
+    selectedDeviceIds.forEach((id) => {
+      if (id) deviceSet.add(id);
+    });
+  }
+
+  const labelParts = selectedFilters.map(
+    (id) => AUDIENCE_FILTER_CHIPS.find((c) => c.id === id)?.label || id,
+  );
+
+  return {
+    isAll,
+    deviceIds: Array.from(deviceSet),
+    fcmTokens: Array.from(tokenSet),
+    summaryLabel: labelParts.join(' + '),
+  };
+}
+
+function AudienceMultiSelect({
+  selectedFilters,
+  onToggleFilter,
+  chipCounts,
+  selectedDeviceIds,
+  onToggleDevice,
+  onSelectOnlineDevices,
+  onClearDevices,
+  onlineCount,
+  users,
+  searchValue,
+  onSearchChange,
+  nowMs,
+  uniqueCount,
+  secondaryCountNote,
+}) {
+  const filteredUsers = useMemo(() => {
+    const q = searchValue.trim().toLowerCase();
+    if (!q) return users;
+    return users.filter(
+      (u) =>
+        (u.user_code || '').toLowerCase().includes(q) ||
+        (u.device_model || '').toLowerCase().includes(q) ||
+        (u.admin_note || '').toLowerCase().includes(q),
+    );
+  }, [users, searchValue]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div className="filter-strip" style={{ marginBottom: 0 }}>
+        {AUDIENCE_FILTER_CHIPS.map((chip) => {
+          const isActive = selectedFilters.includes(chip.id);
+          const count =
+            chip.id === 'specific'
+              ? selectedDeviceIds.length
+              : chipCounts[chip.id] ?? 0;
+          return (
+            <button
+              key={chip.id}
+              type="button"
+              className={`chip${isActive ? ' active' : ''}`}
+              onClick={() => onToggleFilter(chip.id)}
+            >
+              {chip.isOnline && (
+                <span
+                  className="live-pulse-dot"
+                  style={{ width: 7, height: 7, marginInlineEnd: 2 }}
+                />
+              )}
+              {chip.label}
+              <span className="chip-count">({count})</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div
+        style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          gap: 8,
+        }}
+      >
+        <span
+          className={`badge ${uniqueCount > 0 ? 'badge-emerald' : 'badge-amber'}`}
+          style={{ padding: '5px 11px', fontSize: '0.78rem' }}
+        >
+          <ShieldCheck size={13} />
+          سيصل إلى {uniqueCount} جهاز فريد بدون تكرار
+        </span>
+        {secondaryCountNote && (
+          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+            {secondaryCountNote}
+          </span>
+        )}
+      </div>
+
+      {selectedFilters.includes('specific') && (
+        <div className="glass-subcard" style={{ padding: 14 }}>
+          <div className="field-label" style={{ marginBottom: 9 }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <Users size={15} />
+              اختر أشخاصاً محددين (يُدمجون بدون تكرار مع الفلاتر الأخرى)
+            </span>
+            <span className="badge badge-white">{selectedDeviceIds.length} محدد</span>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+            <input
+              type="search"
+              className="input"
+              style={{ padding: '8px 11px', fontSize: '0.82rem', flex: 1, minWidth: 200 }}
+              placeholder="ابحث بكود المستخدم أو نوع الهاتف أو الملاحظة..."
+              value={searchValue}
+              onChange={(e) => onSearchChange(e.target.value)}
+            />
+            {onlineCount > 0 && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={onSelectOnlineDevices}
+              >
+                <span className="live-pulse-dot" style={{ width: 7, height: 7 }} />
+                تحديد المتصلين الآن ({onlineCount})
+              </button>
+            )}
+            {selectedDeviceIds.length > 0 && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={onClearDevices}
+              >
+                مسح التحديد
+              </button>
+            )}
+          </div>
+
+          {filteredUsers.length === 0 ? (
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', padding: 10, textAlign: 'center' }}>
+              لا يوجد مستخدمون مطابقون للبحث
+            </div>
+          ) : (
+            <div className="unlock-grid">
+              {filteredUsers.map((u) => {
+                const isSel = selectedDeviceIds.includes(u.device_id);
+                const uOnline = isUserOnline(u, nowMs);
+                return (
+                  <button
+                    key={u.device_id}
+                    type="button"
+                    className={`unlock-item${isSel ? ' selected' : ''}`}
+                    onClick={() => onToggleDevice(u.device_id)}
+                  >
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700 }}>
+                        {uOnline && (
+                          <span
+                            className="live-pulse-dot"
+                            style={{ width: 7, height: 7 }}
+                            title="متصل الآن"
+                          />
+                        )}
+                        <span className="mono">{u.user_code}</span>
+                        {u.is_starred && <Star size={12} color="var(--amber)" fill="currentColor" />}
+                      </div>
+                      <div style={{ fontSize: '0.71rem', opacity: 0.78, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {u.device_model || 'جهاز غير معروف'}
+                        {u.admin_note ? ` • ${u.admin_note}` : ''}
+                      </div>
+                    </div>
+                    {isSel && <Check size={14} style={{ flexShrink: 0 }} />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function NotificationsTab({
   pushHistory,
   popups,
   users,
+  appConfig,
   onRefresh,
   notify,
 }) {
   const [subTab, setSubTab] = useState('push'); // 'push' | 'popups'
 
-  // Live clock tick (1s on popups for smooth countdowns, 5s on push for live online count)
+  // Live clock tick (1s on popups for smooth countdowns, 5s on push for exact online presence <= 45s)
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     const intervalMs = subTab === 'popups' ? 1000 : 5000;
@@ -52,31 +318,35 @@ export function NotificationsTab({
     return () => clearInterval(timer);
   }, [subTab]);
 
-  // Push FCM Form
+  // Push FCM Form (Multi-Select Audience)
   const [pushTitle, setPushTitle] = useState('');
   const [pushBody, setPushBody] = useState('');
   const [pushImageUrl, setPushImageUrl] = useState('');
-  const [pushTopic, setPushTopic] = useState('all_users');
+  const [pushFilters, setPushFilters] = useState(['all']);
+  const [pushSelectedDevices, setPushSelectedDevices] = useState([]);
+  const [pushUserSearch, setPushUserSearch] = useState('');
   const [pushDeepLink, setPushDeepLink] = useState('');
   const [sendingPush, setSendingPush] = useState(false);
 
-  // Popup Form
+  // Popup Form (Multi-Select Audience + Auto-Expire)
   const [popupTitle, setPopupTitle] = useState('');
   const [popupBody, setPopupBody] = useState('');
   const [popupImageUrl, setPopupImageUrl] = useState('');
   const [popupActionText, setPopupActionText] = useState('');
   const [popupDeepLink, setPopupDeepLink] = useState('');
   const [popupActionUrl, setPopupActionUrl] = useState('');
-  const [popupAudience, setPopupAudience] = useState('all');
+  const [popupFilters, setPopupFilters] = useState(['all']);
   const [popupMaxShows, setPopupMaxShows] = useState(1);
   const [popupExpiry, setPopupExpiry] = useState({ amount: 0, unit: 'never' });
   const [popupActive, setPopupActive] = useState(true);
-  const [selectedDeviceIds, setSelectedDeviceIds] = useState([]);
-  const [userSearch, setUserSearch] = useState('');
+  const [popupSelectedDevices, setPopupSelectedDevices] = useState([]);
+  const [popupUserSearch, setPopupUserSearch] = useState('');
   const [savingPopup, setSavingPopup] = useState(false);
 
   const [deletePopupTarget, setDeletePopupTarget] = useState(null);
   const [deleting, setDeleting] = useState(false);
+
+  const latestVersionCode = Number(appConfig?.latest_version_code ?? 1);
 
   const userCodeMap = useMemo(() => {
     const map = {};
@@ -86,41 +356,71 @@ export function NotificationsTab({
     return map;
   }, [users]);
 
-  const onlineUsers = useMemo(
-    () => users.filter((u) => isUserOnline(u, nowMs)),
+  const chipCounts = useMemo(() => {
+    const counts = {
+      all: users.length,
+      online: 0,
+      pro: 0,
+      free: 0,
+      uptodate: 0,
+      outdated: 0,
+      lab: 0,
+      dev: 0,
+    };
+    users.forEach((u) => {
+      const proActive = getProStatusInfo(u).active;
+      const vCode = Number(u.app_version_code) || 1;
+      if (isUserOnline(u, nowMs)) counts.online += 1;
+      if (proActive) counts.pro += 1;
+      if (!proActive && !u.is_banned) counts.free += 1;
+      if (vCode >= latestVersionCode) counts.uptodate += 1;
+      else counts.outdated += 1;
+      if (u.role === 'lab') counts.lab += 1;
+      if (u.role === 'dev') counts.dev += 1;
+    });
+    return counts;
+  }, [users, latestVersionCode, nowMs]);
+
+  const onlineDeviceIds = useMemo(
+    () => users.filter((u) => isUserOnline(u, nowMs)).map((u) => u.device_id).filter(Boolean),
     [users, nowMs],
   );
 
-  const onlineDeviceIds = useMemo(
-    () => onlineUsers.map((u) => u.device_id).filter(Boolean),
-    [onlineUsers],
-  );
-
-  const onlineFcmTokens = useMemo(
+  // Deduplicated Set unions for Push & Popups
+  const pushAudienceUnion = useMemo(
     () =>
-      Array.from(
-        new Set(
-          onlineUsers
-            .map((u) => (u.fcm_token || '').trim())
-            .filter(Boolean),
-        ),
-      ),
-    [onlineUsers],
+      computeAudienceUnion({
+        selectedFilters: pushFilters,
+        selectedDeviceIds: pushSelectedDevices,
+        users,
+        latestVersionCode,
+        nowMs,
+      }),
+    [pushFilters, pushSelectedDevices, users, latestVersionCode, nowMs],
   );
 
-  const filteredPickerUsers = useMemo(() => {
-    const q = userSearch.trim().toLowerCase();
-    if (!q) return users;
-    return users.filter(
-      (u) =>
-        (u.user_code || '').toLowerCase().includes(q) ||
-        (u.device_model || '').toLowerCase().includes(q) ||
-        (u.admin_note || '').toLowerCase().includes(q),
-    );
-  }, [users, userSearch]);
+  const popupAudienceUnion = useMemo(
+    () =>
+      computeAudienceUnion({
+        selectedFilters: popupFilters,
+        selectedDeviceIds: popupSelectedDevices,
+        users,
+        latestVersionCode,
+        nowMs,
+      }),
+    [popupFilters, popupSelectedDevices, users, latestVersionCode, nowMs],
+  );
 
-  function toggleTargetDevice(deviceId) {
-    setSelectedDeviceIds((prev) =>
+  function togglePushDevice(deviceId) {
+    setPushSelectedDevices((prev) =>
+      prev.includes(deviceId)
+        ? prev.filter((id) => id !== deviceId)
+        : [...prev, deviceId],
+    );
+  }
+
+  function togglePopupDevice(deviceId) {
+    setPopupSelectedDevices((prev) =>
       prev.includes(deviceId)
         ? prev.filter((id) => id !== deviceId)
         : [...prev, deviceId],
@@ -139,28 +439,44 @@ export function NotificationsTab({
       return;
     }
 
-    const isOnlineOnly = pushTopic === 'online_now';
-    if (isOnlineOnly && onlineFcmTokens.length === 0) {
-      notify('لا يوجد مستخدمون متصلون الآن لديهم FCM Token نشط', 'error');
+    if (
+      pushFilters.length === 1 &&
+      pushFilters[0] === 'specific' &&
+      pushSelectedDevices.length === 0
+    ) {
+      notify('يرجى اختيار مستخدم واحد على الأقل عند تحديد "أشخاص محددين"', 'error');
+      return;
+    }
+
+    const singlePureTopic =
+      pushFilters.length === 1 && PURE_TOPIC_MAP[pushFilters[0]]
+        ? PURE_TOPIC_MAP[pushFilters[0]]
+        : null;
+
+    if (!singlePureTopic && pushAudienceUnion.fcmTokens.length === 0) {
+      notify('لا توجد أجهزة مطابقة للفلاتر المختارة تحمل FCM Token نشطاً', 'error');
       return;
     }
 
     setSendingPush(true);
     try {
-      const requestBody = isOnlineOnly
+      const requestBody = singlePureTopic
         ? {
             title,
             body,
-            topic: 'online_now',
-            fcm_tokens: onlineFcmTokens,
-            target_label: `${onlineFcmTokens.length} متصل الآن`,
+            topic: singlePureTopic,
             image_url,
             deep_link,
           }
         : {
             title,
             body,
-            topic: pushTopic,
+            topic:
+              pushFilters.length === 1 && pushFilters[0] === 'online'
+                ? 'online_now'
+                : 'direct_device',
+            fcm_tokens: pushAudienceUnion.fcmTokens,
+            target_label: `${pushAudienceUnion.summaryLabel} (${pushAudienceUnion.fcmTokens.length} جهاز)`,
             image_url,
             deep_link,
           };
@@ -181,14 +497,18 @@ export function NotificationsTab({
         throw new Error(data?.error || data?.details || 'فشل إرسال الإشعار عبر FCM');
       }
 
-      if (isOnlineOnly) {
-        const sent = data.sentCount ?? onlineFcmTokens.length;
+      if (!singlePureTopic) {
+        const sent = data.sentCount ?? pushAudienceUnion.fcmTokens.length;
         const failNote =
           data.failedCount > 0 ? ` (تعذر الوصول إلى ${data.failedCount} جهاز)` : '';
-        notify(`تم إرسال الإشعار إلى ${sent} مستخدم متصل الآن بنجاح!${failNote}`, 'success');
+        notify(
+          `تم إرسال الإشعار إلى ${sent} جهاز فريد بدون تكرار (${pushAudienceUnion.summaryLabel})!${failNote}`,
+          'success',
+        );
       } else {
-        notify('تم إرسال الإشعار الفوري بنجاح!', 'success');
+        notify(`تم إرسال الإشعار الفوري بنجاح (${pushAudienceUnion.summaryLabel})!`, 'success');
       }
+
       setPushTitle('');
       setPushBody('');
       setPushImageUrl('');
@@ -207,12 +527,22 @@ export function NotificationsTab({
       notify('يرجى إدخال عنوان ومحتوى الرسالة المنبثقة', 'error');
       return;
     }
-    if (popupAudience === 'specific' && selectedDeviceIds.length === 0) {
-      notify('يرجى اختيار مستخدم واحد على الأقل عند تحديد "مستخدمين محددين"', 'error');
+    if (
+      popupFilters.length === 1 &&
+      popupFilters[0] === 'specific' &&
+      popupSelectedDevices.length === 0
+    ) {
+      notify('يرجى اختيار مستخدم واحد على الأقل عند تحديد "أشخاص محددين"', 'error');
       return;
     }
-    if (popupAudience === 'online' && onlineDeviceIds.length === 0) {
-      notify('لا يوجد مستخدمون متصلون الآن لإرسال الرسالة لهم', 'error');
+
+    const singlePureAudience =
+      popupFilters.length === 1 && PURE_POPUP_AUDIENCE_SET.has(popupFilters[0])
+        ? popupFilters[0]
+        : null;
+
+    if (!singlePureAudience && popupAudienceUnion.deviceIds.length === 0) {
+      notify('لا توجد أجهزة مطابقة للفلاتر المختارة لإرسال الرسالة لها', 'error');
       return;
     }
 
@@ -221,16 +551,8 @@ export function NotificationsTab({
 
     setSavingPopup(true);
     try {
-      let targetDevices = [];
-      let dbAudience = popupAudience;
-
-      if (popupAudience === 'online') {
-        targetDevices = onlineDeviceIds;
-        dbAudience = 'all';
-      } else if (popupAudience === 'specific') {
-        targetDevices = selectedDeviceIds;
-        dbAudience = 'all';
-      }
+      const dbAudience = singlePureAudience || 'all';
+      const targetDevices = singlePureAudience ? [] : popupAudienceUnion.deviceIds;
 
       const { error } = await supabase.from('popup_announcements').insert({
         title: popupTitle.trim(),
@@ -249,30 +571,20 @@ export function NotificationsTab({
       if (error) throw error;
 
       // Trigger immediate silent_sync so live devices receive the popup instantly
-      if (popupAudience === 'online' && onlineFcmTokens.length > 0) {
-        triggerSilentSync({ fcmTokens: onlineFcmTokens });
-      } else if (popupAudience === 'specific') {
-        const selectedTokens = Array.from(
-          new Set(
-            users
-              .filter((u) => selectedDeviceIds.includes(u.device_id))
-              .map((u) => (u.fcm_token || '').trim())
-              .filter(Boolean),
-          ),
-        );
-        if (selectedTokens.length > 0 && selectedTokens.length === selectedDeviceIds.length) {
-          triggerSilentSync({ fcmTokens: selectedTokens });
-        } else {
-          triggerSilentSync({ topic: 'all_users' });
-        }
+      if (
+        !singlePureAudience &&
+        popupAudienceUnion.fcmTokens.length > 0 &&
+        popupAudienceUnion.fcmTokens.length === popupAudienceUnion.deviceIds.length
+      ) {
+        triggerSilentSync({ fcmTokens: popupAudienceUnion.fcmTokens });
       } else {
         triggerSilentSync({ topic: 'all_users' });
       }
 
       notify(
-        popupAudience === 'online'
-          ? `تم نشر الرسالة المنبثقة لـ ${targetDevices.length} مستخدم متصل الآن (${expirySpec.labelAr})`
-          : `تم نشر الرسالة المنبثقة ومزامنة التطبيقات فورياً (${expirySpec.labelAr})`,
+        singlePureAudience
+          ? `تم نشر الرسالة المنبثقة ومزامنة التطبيقات فورياً (${expirySpec.labelAr})`
+          : `تم نشر الرسالة المنبثقة لـ ${targetDevices.length} جهاز فريد بدون تكرار (${expirySpec.labelAr})`,
         'success',
       );
       setPopupTitle('');
@@ -281,9 +593,9 @@ export function NotificationsTab({
       setPopupActionText('');
       setPopupDeepLink('');
       setPopupActionUrl('');
-      setPopupAudience('all');
-      setSelectedDeviceIds([]);
-      setUserSearch('');
+      setPopupFilters(['all']);
+      setPopupSelectedDevices([]);
+      setPopupUserSearch('');
       setPopupMaxShows(1);
       setPopupExpiry({ amount: 0, unit: 'never' });
       setPopupActive(true);
@@ -335,12 +647,19 @@ export function NotificationsTab({
     return `${n} مرات`;
   }
 
+  const pushUsesTokenBatch = !(
+    pushFilters.length === 1 && PURE_TOPIC_MAP[pushFilters[0]]
+  );
+  const popupUsesDeviceList = !(
+    popupFilters.length === 1 && PURE_POPUP_AUDIENCE_SET.has(popupFilters[0])
+  );
+
   return (
     <section>
       <div className="page-header">
         <div className="page-title-group">
           <h1>الإشعارات والرسائل المنبثقة</h1>
-          <p>إشعارات FCM فورية مع التوجيه العميق ورسائل منبثقة عامة أو لمستخدمين محددين</p>
+          <p>استهداف متعدد الفلاتر بدون تكرار (Set Union)، إشعارات FCM فورية، ورسائل منبثقة مؤقتة</p>
         </div>
 
         <div className="segmented">
@@ -376,83 +695,37 @@ export function NotificationsTab({
 
               <div className="form-grid">
                 <div className="field">
-                  <label className="field-label" htmlFor="push-topic">
-                    الجمهور المستهدف
-                    {pushTopic === 'online_now' && (
-                      <span className="badge badge-emerald">
-                        <span className="live-pulse-dot" style={{ width: 7, height: 7 }} />
-                        {onlineFcmTokens.length} جاهز للإرسال
-                      </span>
-                    )}
-                  </label>
-                  <select
-                    id="push-topic"
-                    className="select"
-                    value={pushTopic}
-                    onChange={(e) => setPushTopic(e.target.value)}
-                  >
-                    {PUSH_TOPIC_OPTIONS.map((t) => (
-                      <option key={t.value} value={t.value}>
-                        {t.value === 'online_now'
-                          ? `${t.label} (${onlineUsers.length})`
-                          : t.label}
-                      </option>
-                    ))}
-                  </select>
+                  <span className="field-label">
+                    الجمهور المستهدف (يمكنك اختيار أكثر من فلتر معاً)
+                  </span>
+                  <AudienceMultiSelect
+                    selectedFilters={pushFilters}
+                    onToggleFilter={(id) =>
+                      setPushFilters((prev) => toggleFilterList(prev, id))
+                    }
+                    chipCounts={chipCounts}
+                    selectedDeviceIds={pushSelectedDevices}
+                    onToggleDevice={togglePushDevice}
+                    onSelectOnlineDevices={() => setPushSelectedDevices(onlineDeviceIds)}
+                    onClearDevices={() => setPushSelectedDevices([])}
+                    onlineCount={onlineDeviceIds.length}
+                    users={users}
+                    searchValue={pushUserSearch}
+                    onSearchChange={setPushUserSearch}
+                    nowMs={nowMs}
+                    uniqueCount={
+                      pushUsesTokenBatch
+                        ? pushAudienceUnion.fcmTokens.length
+                        : pushAudienceUnion.deviceIds.length
+                    }
+                    secondaryCountNote={
+                      pushUsesTokenBatch &&
+                      pushAudienceUnion.deviceIds.length > pushAudienceUnion.fcmTokens.length
+                        ? `(إجمالي مطابق: ${pushAudienceUnion.deviceIds.length} • لديهم FCM Token: ${pushAudienceUnion.fcmTokens.length})`
+                        : null
+                    }
+                  />
                 </div>
-
-                {pushTopic === 'online_now' && (
-                  <div className="glass-subcard" style={{ padding: 12 }}>
-                    <div
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        gap: 8,
-                        flexWrap: 'wrap',
-                        marginBottom: onlineUsers.length > 0 ? 8 : 0,
-                      }}
-                    >
-                      <span
-                        style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 7,
-                          fontSize: '0.8rem',
-                          fontWeight: 600,
-                          color: onlineFcmTokens.length > 0 ? 'var(--emerald)' : 'var(--amber)',
-                        }}
-                      >
-                        <span
-                          className="live-pulse-dot"
-                          style={{
-                            width: 7,
-                            height: 7,
-                            background: onlineFcmTokens.length > 0 ? 'var(--emerald)' : 'var(--amber)',
-                          }}
-                        />
-                        {onlineUsers.length === 0
-                          ? 'لا يوجد مستخدمون متصلون الآن (آخر 65 ثانية)'
-                          : `متصل الآن: ${onlineUsers.length} مستخدم (${onlineFcmTokens.length} لديهم FCM Token نشط)`}
-                      </span>
-                    </div>
-                    {onlineUsers.length > 0 && (
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-                        {onlineUsers.slice(0, 8).map((u) => (
-                          <span
-                            key={u.device_id}
-                            className={`badge mono ${u.fcm_token ? 'badge-emerald' : 'badge-neutral'}`}
-                          >
-                            {u.user_code}
-                          </span>
-                        ))}
-                        {onlineUsers.length > 8 && (
-                          <span className="badge badge-neutral">+{onlineUsers.length - 8}</span>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
 
                 <div className="field">
                   <label className="field-label" htmlFor="push-title">
@@ -482,19 +755,16 @@ export function NotificationsTab({
                   />
                 </div>
 
-                <div className="field">
-                  <label className="field-label" htmlFor="push-img">
-                    رابط صورة مرفقة <span className="field-hint">(اختياري)</span>
-                  </label>
-                  <input
-                    id="push-img"
-                    type="url"
-                    className="input ltr"
-                    placeholder="https://..."
-                    value={pushImageUrl}
-                    onChange={(e) => setPushImageUrl(e.target.value)}
-                  />
-                </div>
+                <LosslessImagePickerField
+                  id="push-img"
+                  label="صورة مرفقة للإشعار"
+                  hint="(اختياري — بدون ضغط)"
+                  value={pushImageUrl}
+                  onChange={setPushImageUrl}
+                  notify={notify}
+                  disabled={sendingPush}
+                  showPreview={false}
+                />
 
                 <DeepLinkPicker
                   id="push-deeplink"
@@ -509,7 +779,7 @@ export function NotificationsTab({
                   style={{ marginTop: 4 }}
                   disabled={
                     sendingPush ||
-                    (pushTopic === 'online_now' && onlineFcmTokens.length === 0)
+                    (pushUsesTokenBatch && pushAudienceUnion.fcmTokens.length === 0)
                   }
                 >
                   {sendingPush ? (
@@ -520,9 +790,9 @@ export function NotificationsTab({
                   ) : (
                     <>
                       <Send size={17} />
-                      {pushTopic === 'online_now'
-                        ? `إرسال الإشعار للمتصلين الآن (${onlineFcmTokens.length})`
-                        : 'إرسال الإشعار الآن'}
+                      {pushUsesTokenBatch
+                        ? `إرسال الإشعار لـ ${pushAudienceUnion.fcmTokens.length} جهاز فريد`
+                        : `إرسال الإشعار الآن (${pushAudienceUnion.summaryLabel})`}
                     </>
                   )}
                 </button>
@@ -536,7 +806,7 @@ export function NotificationsTab({
                   <Sparkles size={18} color="var(--amber)" />
                   معاينة الإشعار على أندرويد
                 </span>
-                <span className="badge badge-white">{getTopicLabelAr(pushTopic)}</span>
+                <span className="badge badge-white">{pushAudienceUnion.summaryLabel}</span>
               </h2>
 
               <div className="push-preview">
@@ -573,8 +843,8 @@ export function NotificationsTab({
               </div>
 
               <p style={{ margin: '14px 0 0', fontSize: '0.77rem', color: 'var(--text-muted)' }}>
-                يتم إرسال بيانات التوجيه العميق (`deep_link`) داخل حزمة FCM Data ليفتح التطبيق
-                مباشرة على القسم أو الخلفية المحددة.
+                عند دمج أكثر من فلتر، يتم حساب اتحاد الأجهزة الفريدة (Set Union) بحيث يتلقى كل جهاز
+                إشعاراً واحداً فقط بدون أي تكرار.
               </p>
             </div>
           </div>
@@ -671,7 +941,7 @@ export function NotificationsTab({
           </div>
         </>
       ) : (
-        /* In-App Pop-up Announcements with Targeted Multi-User Picker */
+        /* In-App Pop-up Announcements with Multi-Select Audience & Auto-Expire */
         <>
           <form onSubmit={handleCreatePopup} className="glass-panel section-card">
             <h2 className="section-heading">
@@ -681,7 +951,7 @@ export function NotificationsTab({
               </span>
             </h2>
 
-            <div className="form-grid cols-3" style={{ marginBottom: 14 }}>
+            <div className="form-grid cols-2" style={{ marginBottom: 14 }}>
               <div className="field">
                 <label className="field-label" htmlFor="pop-title">
                   العنوان *
@@ -694,26 +964,6 @@ export function NotificationsTab({
                   onChange={(e) => setPopupTitle(e.target.value)}
                   required
                 />
-              </div>
-
-              <div className="field">
-                <label className="field-label" htmlFor="pop-aud">
-                  الجمهور المستهدف
-                </label>
-                <select
-                  id="pop-aud"
-                  className="select"
-                  value={popupAudience}
-                  onChange={(e) => setPopupAudience(e.target.value)}
-                >
-                  {POPUP_AUDIENCE_OPTIONS.map((a) => (
-                    <option key={a.value} value={a.value}>
-                      {a.value === 'online'
-                        ? `${a.label} (${onlineUsers.length})`
-                        : a.label}
-                    </option>
-                  ))}
-                </select>
               </div>
 
               <div className="field">
@@ -735,126 +985,28 @@ export function NotificationsTab({
               </div>
             </div>
 
-            {/* Live Online Now Auto-Filled Devices Preview */}
-            {popupAudience === 'online' && (
-              <div className="glass-subcard" style={{ padding: 14, marginBottom: 14 }}>
-                <div className="field-label" style={{ marginBottom: onlineUsers.length > 0 ? 9 : 0 }}>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-                    <span
-                      className="live-pulse-dot"
-                      style={{
-                        width: 8,
-                        height: 8,
-                        background: onlineUsers.length > 0 ? 'var(--emerald)' : 'var(--amber)',
-                      }}
-                    />
-                    {onlineUsers.length === 0
-                      ? 'لا يوجد مستخدمون متصلون الآن (آخر 65 ثانية)'
-                      : `سيتم تعبئة target_device_ids تلقائياً لجميع المتصلين الآن (${onlineUsers.length} جهاز)`}
-                  </span>
-                  <span className={`badge ${onlineUsers.length > 0 ? 'badge-emerald' : 'badge-amber'}`}>
-                    {onlineUsers.length} متصل الآن
-                  </span>
-                </div>
-
-                {onlineUsers.length > 0 && (
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                    {onlineUsers.slice(0, 12).map((u) => (
-                      <span key={u.device_id} className="badge badge-emerald mono">
-                        {u.user_code}
-                        {u.device_model ? ` • ${u.device_model}` : ''}
-                      </span>
-                    ))}
-                    {onlineUsers.length > 12 && (
-                      <span className="badge badge-neutral">+{onlineUsers.length - 12}</span>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Searchable Multi-Select User Picker when audience === 'specific' */}
-            {popupAudience === 'specific' && (
-              <div className="glass-subcard" style={{ padding: 14, marginBottom: 14 }}>
-                <div className="field-label" style={{ marginBottom: 9 }}>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                    <Users size={15} />
-                    اختر المستخدمين المستهدفين (تظهر الرسالة لهم فقط)
-                  </span>
-                  <span className="badge badge-white">{selectedDeviceIds.length} محدد</span>
-                </div>
-
-                <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
-                  <input
-                    type="search"
-                    className="input"
-                    style={{ padding: '8px 11px', fontSize: '0.82rem', flex: 1, minWidth: 200 }}
-                    placeholder="ابحث بكود المستخدم أو نوع الهاتف أو الملاحظة..."
-                    value={userSearch}
-                    onChange={(e) => setUserSearch(e.target.value)}
-                  />
-                  {onlineDeviceIds.length > 0 && (
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => setSelectedDeviceIds(onlineDeviceIds)}
-                    >
-                      <span className="live-pulse-dot" style={{ width: 7, height: 7 }} />
-                      تحديد المتصلين الآن ({onlineDeviceIds.length})
-                    </button>
-                  )}
-                  {selectedDeviceIds.length > 0 && (
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => setSelectedDeviceIds([])}
-                    >
-                      مسح التحديد
-                    </button>
-                  )}
-                </div>
-
-                {filteredPickerUsers.length === 0 ? (
-                  <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', padding: 10, textAlign: 'center' }}>
-                    لا يوجد مستخدمون مطابقون للبحث
-                  </div>
-                ) : (
-                  <div className="unlock-grid">
-                    {filteredPickerUsers.map((u) => {
-                      const isSel = selectedDeviceIds.includes(u.device_id);
-                      const uOnline = isUserOnline(u, nowMs);
-                      return (
-                        <button
-                          key={u.device_id}
-                          type="button"
-                          className={`unlock-item${isSel ? ' selected' : ''}`}
-                          onClick={() => toggleTargetDevice(u.device_id)}
-                        >
-                          <div style={{ minWidth: 0 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700 }}>
-                              {uOnline && (
-                                <span
-                                  className="live-pulse-dot"
-                                  style={{ width: 7, height: 7 }}
-                                  title="متصل الآن"
-                                />
-                              )}
-                              <span className="mono">{u.user_code}</span>
-                              {u.is_starred && <Star size={12} color="var(--amber)" fill="currentColor" />}
-                            </div>
-                            <div style={{ fontSize: '0.71rem', opacity: 0.78, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                              {u.device_model || 'جهاز غير معروف'}
-                              {u.admin_note ? ` • ${u.admin_note}` : ''}
-                            </div>
-                          </div>
-                          {isSel && <Check size={14} style={{ flexShrink: 0 }} />}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
+            <div className="field" style={{ marginBottom: 14 }}>
+              <span className="field-label">
+                الجمهور المستهدف (يمكنك اختيار أكثر من فلتر معاً بدون تكرار)
+              </span>
+              <AudienceMultiSelect
+                selectedFilters={popupFilters}
+                onToggleFilter={(id) =>
+                  setPopupFilters((prev) => toggleFilterList(prev, id))
+                }
+                chipCounts={chipCounts}
+                selectedDeviceIds={popupSelectedDevices}
+                onToggleDevice={togglePopupDevice}
+                onSelectOnlineDevices={() => setPopupSelectedDevices(onlineDeviceIds)}
+                onClearDevices={() => setPopupSelectedDevices([])}
+                onlineCount={onlineDeviceIds.length}
+                users={users}
+                searchValue={popupUserSearch}
+                onSearchChange={setPopupUserSearch}
+                nowMs={nowMs}
+                uniqueCount={popupAudienceUnion.deviceIds.length}
+              />
+            </div>
 
             <div className="field" style={{ marginBottom: 14 }}>
               <label className="field-label" htmlFor="pop-body">
@@ -904,19 +1056,16 @@ export function NotificationsTab({
                 />
               </div>
 
-              <div className="field">
-                <label className="field-label" htmlFor="pop-img">
-                  رابط الصورة <span className="field-hint">(اختياري)</span>
-                </label>
-                <input
-                  id="pop-img"
-                  type="url"
-                  className="input ltr"
-                  placeholder="https://..."
-                  value={popupImageUrl}
-                  onChange={(e) => setPopupImageUrl(e.target.value)}
-                />
-              </div>
+              <LosslessImagePickerField
+                id="pop-img"
+                label="صورة الرسالة المنبثقة"
+                hint="(اختياري — بدون ضغط)"
+                value={popupImageUrl}
+                onChange={setPopupImageUrl}
+                notify={notify}
+                disabled={savingPopup}
+                previewMaxHeight={150}
+              />
             </div>
 
             <div className="form-grid cols-2" style={{ marginBottom: 14 }}>
@@ -965,14 +1114,14 @@ export function NotificationsTab({
                 className="btn btn-primary"
                 disabled={
                   savingPopup ||
-                  (popupAudience === 'online' && onlineDeviceIds.length === 0)
+                  (popupUsesDeviceList && popupAudienceUnion.deviceIds.length === 0)
                 }
               >
                 <Plus size={16} />
                 {savingPopup
                   ? 'جاري النشر...'
-                  : popupAudience === 'online'
-                    ? `نشر الرسالة للمتصلين الآن (${onlineDeviceIds.length})`
+                  : popupUsesDeviceList
+                    ? `نشر الرسالة لـ ${popupAudienceUnion.deviceIds.length} جهاز فريد`
                     : 'نشر الرسالة المنبثقة'}
               </button>
             </div>

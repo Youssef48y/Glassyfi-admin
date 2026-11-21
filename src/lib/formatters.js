@@ -144,13 +144,20 @@ export function getProStatusInfo(user) {
   };
 }
 
-export const ONLINE_WINDOW_MS = 65_000;
+export const ONLINE_WINDOW_MS = 45_000;
 
 export function isUserOnline(user, nowMs = Date.now()) {
-  if (!user?.last_seen_at) return false;
+  if (!user?.is_online || !user?.last_seen_at) return false;
   const seenMs = new Date(user.last_seen_at).getTime();
   if (Number.isNaN(seenMs)) return false;
   return nowMs - seenMs <= ONLINE_WINDOW_MS;
+}
+
+export function formatAndroidVersion(raw) {
+  const clean = String(raw || '').trim();
+  if (!clean) return null;
+  if (/^android/i.test(clean)) return clean;
+  return `Android ${clean}`;
 }
 
 export function computeExpirySpec(amount, unit) {

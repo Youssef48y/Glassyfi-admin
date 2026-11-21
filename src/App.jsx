@@ -14,6 +14,7 @@ import {
   Loader2,
   Menu,
   X,
+  Bug,
 } from 'lucide-react';
 import { supabase, verifyAdminAccess } from './lib/supabase';
 import { LoginScreen } from './components/LoginScreen';
@@ -24,6 +25,7 @@ import { WidgetsTab } from './components/WidgetsTab';
 import { UsersTab } from './components/UsersTab';
 import { LabFeedbackTab } from './components/LabFeedbackTab';
 import { SecurityTab } from './components/SecurityTab';
+import { ErrorsTab } from './components/ErrorsTab';
 import { NotificationsTab } from './components/NotificationsTab';
 import { ConfigTab } from './components/ConfigTab';
 
@@ -47,6 +49,7 @@ const NAV_GROUPS = [
       { id: 'users', label: 'المستخدمين والأكواد', shortLabel: 'المستخدمين', icon: Users },
       { id: 'lab_feedback', label: 'المختبر والبلاغات', shortLabel: 'المختبر', icon: FlaskConical },
       { id: 'security', label: 'الحماية والمشبوهين', shortLabel: 'الحماية', icon: ShieldAlert },
+      { id: 'errors', label: 'الأخطاء (Errors)', shortLabel: 'الأخطاء', icon: Bug },
     ],
   },
   {
@@ -60,12 +63,13 @@ const NAV_GROUPS = [
 
 const ALL_TABS = NAV_GROUPS.flatMap((g) => g.items);
 const MOBILE_PRIMARY_IDS = ['dashboard', 'wallpapers', 'widgets', 'users'];
-const MOBILE_MORE_IDS = ['lab_feedback', 'security', 'notifications', 'config'];
+const MOBILE_MORE_IDS = ['lab_feedback', 'security', 'errors', 'notifications', 'config'];
 
 const REALTIME_TABLES = [
   'app_users',
   'analytics_events',
   'security_alerts',
+  'app_errors',
   'user_feedback',
   'lab_applications',
   'wallpapers',
@@ -103,6 +107,7 @@ export default function App() {
   const [popups, setPopups] = useState([]);
   const [appConfig, setAppConfig] = useState(null);
   const [securityAlerts, setSecurityAlerts] = useState([]);
+  const [appErrors, setAppErrors] = useState([]);
   const [analyticsEvents, setAnalyticsEvents] = useState([]);
   const [userFeedback, setUserFeedback] = useState([]);
   const [labApplications, setLabApplications] = useState([]);
@@ -229,6 +234,15 @@ export default function App() {
             .order('created_at', { ascending: false })
             .limit(150);
           if (data) setSecurityAlerts(data);
+          break;
+        }
+        case 'app_errors': {
+          const { data } = await supabase
+            .from('app_errors')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(200);
+          if (data) setAppErrors(data);
           break;
         }
         case 'analytics_events': {
@@ -386,6 +400,7 @@ export default function App() {
     setPopups([]);
     setAppConfig(null);
     setSecurityAlerts([]);
+    setAppErrors([]);
     setAnalyticsEvents([]);
     setUserFeedback([]);
     setLabApplications([]);
@@ -395,7 +410,9 @@ export default function App() {
   const pendingLabCount = labApplications.filter((a) => a.status === 'pending').length;
   const newFeedbackCount = userFeedback.filter((f) => f.status === 'new').length;
   const unresolvedSecCount = securityAlerts.filter((a) => !a.resolved).length;
-  const moreAlertsTotal = pendingLabCount + newFeedbackCount + unresolvedSecCount;
+  const unresolvedErrorsCount = appErrors.filter((e) => !e.resolved).length;
+  const moreAlertsTotal =
+    pendingLabCount + newFeedbackCount + unresolvedSecCount + unresolvedErrorsCount;
 
   function getTabBadge(tabId) {
     if (tabId === 'wallpapers') return { value: wallpapers.length, alert: false };
@@ -409,6 +426,9 @@ export default function App() {
     }
     if (tabId === 'security') {
       return { value: unresolvedSecCount, alert: unresolvedSecCount > 0 };
+    }
+    if (tabId === 'errors') {
+      return { value: unresolvedErrorsCount, alert: unresolvedErrorsCount > 0 };
     }
     if (tabId === 'notifications') {
       return { value: popups.filter((p) => p.is_active).length, alert: false };
@@ -634,6 +654,8 @@ export default function App() {
             widgets={[...widgets, ...dynamicWidgets]}
             depthTools={depthTools}
             appConfig={appConfig}
+            analyticsEvents={analyticsEvents}
+            appErrors={appErrors}
             loading={dataLoading}
             onRefresh={fetchAllData}
             notify={notify}
@@ -656,11 +678,20 @@ export default function App() {
             notify={notify}
           />
         )}
+        {activeTab === 'errors' && (
+          <ErrorsTab
+            appErrors={appErrors}
+            loading={dataLoading}
+            onRefresh={fetchAllData}
+            notify={notify}
+          />
+        )}
         {activeTab === 'notifications' && (
           <NotificationsTab
             pushHistory={pushHistory}
             popups={popups}
             users={users}
+            appConfig={appConfig}
             onRefresh={fetchAllData}
             notify={notify}
           />

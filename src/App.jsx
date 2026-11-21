@@ -669,6 +669,7 @@ export default function App() {
           <ConfigTab
             config={appConfig}
             faqItems={faqItems}
+            wallpapers={wallpapers}
             loading={dataLoading}
             onRefresh={fetchAllData}
             notify={notify}

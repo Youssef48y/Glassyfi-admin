@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Rocket,
   Wrench,
@@ -23,10 +23,20 @@ import {
   X,
   DownloadCloud,
   Bell,
+  Package,
+  Image as ImageIcon,
+  Upload,
+  Pin,
+  Link2,
 } from 'lucide-react';
-import { supabase, triggerSilentSync } from '../lib/supabase';
+import { supabase, triggerSilentSync, WALLPAPERS_BUCKET } from '../lib/supabase';
 import { formatDateAr } from '../lib/formatters';
-import { formatFileSize } from '../lib/imageUtils';
+import {
+  formatFileSize,
+  validateImageFile,
+  getExtensionFromFile,
+  generateUniqueId,
+} from '../lib/imageUtils';
 import { ToggleSwitch } from './ToggleSwitch';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -40,12 +50,39 @@ function parseVersionCode(body) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function buildDefaultApkFilename(versionName) {
+  const ver = String(versionName || '1.0.0').trim().replace(/^v/i, '') || '1.0.0';
+  return `Vitrify-v${ver}.apk`;
+}
+
 function buildDefaultTelegramCaption(versionName, changelogAr) {
   const ver = String(versionName || '1.0.0').trim().replace(/^v/i, '') || '1.0.0';
   const notes = String(changelogAr || '').trim();
   return [
-    `✨ تحديث Vitrify الجديد v${ver}`,
-    notes ? `\nما الجديد:\n${notes}` : '\nثبّت ملف الـ APK المرفق للحصول على أحدث المزايا والتحسينات.',
+    `<b>✨ تحديث Vitrify الجديد v${ver}</b>`,
+    notes
+      ? `\n<b>ما الجديد:</b>\n${notes}`
+      : '\nثبّت ملف الـ APK المرفق للحصول على أحدث المزايا والتحسينات.',
+  ].join('\n');
+}
+
+function buildPromoTemplateCaption() {
+  return [
+    '<b>🎁 هدية خاصة لمتابعي قناة Vitrify!</b>',
+    '',
+    'استخدم كود التفعيل التالي داخل التطبيق للحصول على باقة <b>Pro</b> مجاناً:',
+    '<code>VITRIFY-GIFT30</code>',
+    '',
+    '⚡ سارع بالتفعيل قبل نفاد عدد الاستخدامات!',
+  ].join('\n');
+}
+
+function buildNewWallpaperTemplateCaption() {
+  return [
+    '<b>🖼️ خلفية عمق جديدة متاحة الآن في Vitrify!</b>',
+    '',
+    'جرب الخلفية الجديدة بدقة أصلية كاملة مع تأثير العمق السحري والساعات الزجاجية ✨',
+    'افتح قسم <b>الخلفيات</b> داخل التطبيق وحمّلها الآن.',
   ].join('\n');
 }
 
@@ -85,7 +122,14 @@ const EMPTY_FAQ = {
   is_visible: true,
 };
 
-export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify }) {
+export function ConfigTab({
+  config,
+  faqItems = [],
+  wallpapers = [],
+  loading,
+  onRefresh,
+  notify,
+}) {
   const [subTab, setSubTab] = useState('update'); // 'update' | 'content' | 'faq'
   const [form, setForm] = useState(DEFAULT_CONFIG);
   const [initialTerms, setInitialTerms] = useState('');
@@ -96,8 +140,16 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
   const [fetchedReleaseInfo, setFetchedReleaseInfo] = useState(null);
   const [sendPushOnSave, setSendPushOnSave] = useState(false);
 
-  // Telegram APK Publisher state
+  // Telegram Publisher v2 state (APK / Text Post / Photo + Post)
+  const [tgMode, setTgMode] = useState('apk'); // 'apk' | 'post' | 'photo'
   const [tgTarget, setTgTarget] = useState('channel'); // 'channel' | 'group' | 'both'
+  const [tgApkFilename, setTgApkFilename] = useState(buildDefaultApkFilename('1.0.0'));
+  const [tgFilenameTouched, setTgFilenameTouched] = useState(false);
+  const [tgPhotoUrl, setTgPhotoUrl] = useState('');
+  const [tgUploadingPhoto, setTgUploadingPhoto] = useState(false);
+  const [tgButtonText, setTgButtonText] = useState('');
+  const [tgButtonUrl, setTgButtonUrl] = useState('');
+  const [tgPinMessage, setTgPinMessage] = useState(false);
   const [tgCaption, setTgCaption] = useState(
     buildDefaultTelegramCaption('1.0.0', ''),
   );
@@ -110,6 +162,14 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
   const [faqBusyId, setFaqBusyId] = useState('');
   const [deleteFaqTarget, setDeleteFaqTarget] = useState(null);
   const [deletingFaq, setDeletingFaq] = useState(false);
+
+  const cloudWallpapers = useMemo(
+    () =>
+      wallpapers.filter(
+        (w) => typeof w.image_url === 'string' && /^https?:\/\//i.test(w.image_url),
+      ),
+    [wallpapers],
+  );
 
   useEffect(() => {
     if (config) {
@@ -149,7 +209,7 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
     }
   }, [config]);
 
-  // Auto-sync Telegram caption with version name & changelog unless manually customized
+  // Auto-sync Telegram caption & default APK filename with version unless manually edited
   useEffect(() => {
     if (!tgCaptionTouched) {
       setTgCaption(
@@ -160,6 +220,12 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
       );
     }
   }, [form.latest_version_name, form.update_changelog_ar, tgCaptionTouched]);
+
+  useEffect(() => {
+    if (!tgFilenameTouched) {
+      setTgApkFilename(buildDefaultApkFilename(form.latest_version_name));
+    }
+  }, [form.latest_version_name, tgFilenameTouched]);
 
   async function handleFetchLatestGithubRelease() {
     setFetchingRelease(true);
@@ -741,16 +807,34 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
             </div>
           </div>
 
-          {/* Telegram APK Publisher Card */}
+          {/* Telegram Publisher Card (APK / Text Post / Photo + Post) */}
           <div className="glass-panel section-card">
             <div className="section-heading">
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                 <Send size={18} color="var(--sky)" />
                 النشر على تيليجرام (Telegram Publisher)
               </span>
-              <span className="badge badge-sky mono">
-                Vitrify-v{(form.latest_version_name || '1.0.0').replace(/^v/i, '')}-release.apk
-              </span>
+
+              <div className="segmented">
+                {[
+                  { id: 'apk', label: 'إرسال APK', icon: Package },
+                  { id: 'post', label: 'منشور نصي', icon: FileText },
+                  { id: 'photo', label: 'صورة + منشور', icon: ImageIcon },
+                ].map((m) => {
+                  const Icon = m.icon;
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      className={`segmented-btn${tgMode === m.id ? ' active' : ''}`}
+                      onClick={() => setTgMode(m.id)}
+                    >
+                      <Icon size={14} />
+                      {m.label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             <div className="form-grid cols-2" style={{ marginBottom: 14 }}>
@@ -791,7 +875,7 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
                 {[
                   { id: 'channel', label: 'القناة فقط' },
                   { id: 'group', label: 'الجروب فقط' },
-                  { id: 'both', label: 'القناة والجروب معاً' },
+                  { id: 'both', label: 'الاثنين معاً' },
                 ].map((opt) => (
                   <button
                     key={opt.id}
@@ -805,34 +889,150 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
               </div>
             </div>
 
-            <div className="field" style={{ marginBottom: 15 }}>
+            {/* APK Filename Input (APK Mode) */}
+            {tgMode === 'apk' && (
+              <div className="field" style={{ marginBottom: 14 }}>
+                <div className="field-label">
+                  <label htmlFor="cfg-tg-apk-name">
+                    اسم ملف التطبيق (apk_filename)
+                  </label>
+                  <span className="field-hint">يُضاف .apk تلقائياً إذا لم يُكتب</span>
+                </div>
+                <input
+                  id="cfg-tg-apk-name"
+                  className="input mono"
+                  placeholder="Vitrify-v1.0.1.apk"
+                  value={tgApkFilename}
+                  onChange={(e) => {
+                    setTgFilenameTouched(true);
+                    setTgApkFilename(e.target.value);
+                  }}
+                />
+              </div>
+            )}
+
+            {/* Photo URL / Upload / Existing Wallpaper Picker (Photo + Post Mode) */}
+            {tgMode === 'photo' && (
+              <div className="glass-subcard" style={{ padding: 14, marginBottom: 14 }}>
+                <div className="field" style={{ marginBottom: 10 }}>
+                  <div className="field-label">
+                    <label htmlFor="cfg-tg-photo-url">رابط الصورة / رفع صورة مؤقتة</label>
+                    <label
+                      className="btn btn-secondary btn-sm"
+                      style={{ cursor: tgUploadingPhoto ? 'wait' : 'pointer' }}
+                    >
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        style={{ display: 'none' }}
+                        disabled={tgUploadingPhoto}
+                        onChange={handleUploadTelegramPhoto}
+                      />
+                      {tgUploadingPhoto ? (
+                        <>
+                          <Loader2 size={13} className="spinner" /> جاري الرفع...
+                        </>
+                      ) : (
+                        <>
+                          <Upload size={13} /> رفع صورة من الجهاز
+                        </>
+                      )}
+                    </label>
+                  </div>
+                  <input
+                    id="cfg-tg-photo-url"
+                    type="url"
+                    className="input ltr"
+                    placeholder="https://..."
+                    value={tgPhotoUrl}
+                    onChange={(e) => setTgPhotoUrl(e.target.value)}
+                  />
+                </div>
+
+                {cloudWallpapers.length > 0 && (
+                  <div className="field" style={{ marginBottom: tgPhotoUrl.trim() ? 10 : 0 }}>
+                    <label className="field-label" htmlFor="cfg-tg-wp-pick">
+                      أو اختر من خلفيات التطبيق الحالية
+                    </label>
+                    <select
+                      id="cfg-tg-wp-pick"
+                      className="select"
+                      value={
+                        cloudWallpapers.some((w) => w.image_url === tgPhotoUrl)
+                          ? tgPhotoUrl
+                          : ''
+                      }
+                      onChange={(e) => {
+                        if (e.target.value) setTgPhotoUrl(e.target.value);
+                      }}
+                    >
+                      <option value="">— اختر خلفية سحابية —</option>
+                      {cloudWallpapers.map((w) => (
+                        <option key={w.id} value={w.image_url}>
+                          {w.title_ar}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {tgPhotoUrl.trim() && (
+                  <img
+                    src={tgPhotoUrl.trim()}
+                    alt="معاينة صورة المنشور"
+                    className="push-preview-img"
+                    style={{ maxHeight: 170 }}
+                    onError={(e) => {
+                      e.currentTarget.style.display = 'none';
+                    }}
+                  />
+                )}
+              </div>
+            )}
+
+            {/* Quick Post Templates Chips */}
+            <div className="field" style={{ marginBottom: 10 }}>
+              <span className="field-label">قوالب منشورات جاهزة</span>
+              <div className="filter-strip" style={{ marginBottom: 0 }}>
+                <button
+                  type="button"
+                  className="chip"
+                  onClick={() => applyTelegramTemplate('update')}
+                >
+                  <Sparkles size={12} /> قالب تحديث جديد
+                </button>
+                <button
+                  type="button"
+                  className="chip"
+                  onClick={() => applyTelegramTemplate('promo')}
+                >
+                  <Sparkles size={12} /> قالب كود برومو هدية
+                </button>
+                <button
+                  type="button"
+                  className="chip"
+                  onClick={() => applyTelegramTemplate('wallpaper')}
+                >
+                  <ImageIcon size={12} /> قالب خلفية جديدة
+                </button>
+              </div>
+            </div>
+
+            {/* Editable HTML Caption Box */}
+            <div className="field" style={{ marginBottom: 14 }}>
               <div className="field-label">
                 <label htmlFor="cfg-tg-caption">
-                  نص المنشور المرفق مع ملف الـ APK (Caption)
+                  {tgMode === 'post' ? 'نص المنشور *' : 'نص المنشور (Caption)'}
                 </label>
-                {tgCaptionTouched && (
-                  <button
-                    type="button"
-                    className="btn btn-ghost btn-sm"
-                    style={{ padding: '3px 8px', fontSize: '0.73rem' }}
-                    onClick={() => {
-                      setTgCaptionTouched(false);
-                      setTgCaption(
-                        buildDefaultTelegramCaption(
-                          form.latest_version_name,
-                          form.update_changelog_ar,
-                        ),
-                      );
-                    }}
-                  >
-                    استعادة النص التلقائي
-                  </button>
-                )}
+                <span className="field-hint">
+                  يدعم HTML: <code className="mono">&lt;b&gt;عريض&lt;/b&gt;</code> •{' '}
+                  <code className="mono">&lt;code&gt;كود&lt;/code&gt;</code>
+                </span>
               </div>
               <textarea
                 id="cfg-tg-caption"
                 className="textarea"
-                style={{ minHeight: 96 }}
+                style={{ minHeight: 112 }}
                 value={tgCaption}
                 onChange={(e) => {
                   setTgCaptionTouched(true);
@@ -841,22 +1041,90 @@ export function ConfigTab({ config, faqItems = [], loading, onRefresh, notify })
               />
             </div>
 
+            {/* Optional Inline Button (reply_markup.inline_keyboard) */}
+            <div className="glass-subcard" style={{ padding: 13, marginBottom: 14 }}>
+              <div className="field-label" style={{ marginBottom: 9 }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <Link2 size={14} />
+                  زر أسفل المنشور (اختياري)
+                </span>
+              </div>
+              <div className="form-grid cols-2">
+                <div className="field">
+                  <label className="field-label" htmlFor="cfg-tg-btn-text">
+                    نص الزر
+                  </label>
+                  <input
+                    id="cfg-tg-btn-text"
+                    className="input"
+                    placeholder="مثال: تحميل أحدث إصدار ⬇️"
+                    value={tgButtonText}
+                    onChange={(e) => setTgButtonText(e.target.value)}
+                  />
+                </div>
+                <div className="field">
+                  <label className="field-label" htmlFor="cfg-tg-btn-url">
+                    الرابط
+                  </label>
+                  <input
+                    id="cfg-tg-btn-url"
+                    type="url"
+                    className="input ltr"
+                    placeholder="https://t.me/VitrifyApp"
+                    value={tgButtonUrl}
+                    onChange={(e) => setTgButtonUrl(e.target.value)}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Pin Message Toggle */}
+            <div className="switch-row" style={{ marginBottom: 16 }}>
+              <div className="switch-meta">
+                <span className="switch-title">
+                  <Pin size={15} color={tgPinMessage ? 'var(--amber)' : 'var(--text-secondary)'} />
+                  تثبيت المنشور تلقائياً في القناة (Pin)
+                </span>
+                <span className="switch-desc">
+                  يستدعي <span className="mono">pinChatMessage</span> تلقائياً على الرسالة فور نشرها
+                </span>
+              </div>
+              <ToggleSwitch
+                checked={tgPinMessage}
+                tone="amber"
+                onChange={setTgPinMessage}
+                ariaLabel="تثبيت المنشور تلقائياً في القناة"
+              />
+            </div>
+
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
               <button
                 type="button"
                 className="btn btn-primary"
-                disabled={publishingTelegram || !form.update_url.trim()}
+                disabled={
+                  publishingTelegram ||
+                  tgUploadingPhoto ||
+                  (tgMode === 'apk' && !form.update_url.trim()) ||
+                  (tgMode === 'photo' && !tgPhotoUrl.trim()) ||
+                  (tgMode === 'post' && !tgCaption.trim())
+                }
                 onClick={handlePublishTelegram}
               >
                 {publishingTelegram ? (
                   <>
                     <Loader2 size={16} className="spinner" />
-                    جاري سحب الـ APK ورفعه إلى تيليجرام...
+                    {tgMode === 'apk'
+                      ? 'جاري سحب الـ APK ورفعه إلى تيليجرام...'
+                      : 'جاري النشر على تيليجرام...'}
                   </>
                 ) : (
                   <>
                     <Send size={16} />
-                    إرسال الـ APK إلى تيليجرام الآن ✈️
+                    {tgMode === 'apk'
+                      ? 'إرسال الـ APK إلى تيليجرام الآن ✈️'
+                      : tgMode === 'photo'
+                        ? 'نشر الصورة والمنشور على تيليجرام ✈️'
+                        : 'نشر المنشور النصي على تيليجرام ✈️'}
                   </>
                 )}
               </button>

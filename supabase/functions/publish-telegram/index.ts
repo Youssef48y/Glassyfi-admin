@@ -1,4 +1,4 @@
-// Vitrify Admin - Secure Telegram APK Publisher Edge Function
+// Vitrify Admin - Secure Telegram Publisher Edge Function (APK / Text Post / Photo + Post)
 // Reads TELEGRAM_BOT_TOKEN strictly from Supabase Edge Function Secrets.
 
 const corsHeaders: Record<string, string> = {
@@ -9,12 +9,29 @@ const corsHeaders: Record<string, string> = {
 };
 
 const ALLOWED_TARGETS = new Set(["channel", "group", "both"]);
+const ALLOWED_MODES = new Set(["apk", "post", "photo"]);
 
 function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
+}
+
+function sanitizeApkFilename(rawName: string, versionName: string): string {
+  const safeVersion =
+    versionName.trim().replace(/^v/i, "").replace(/[^a-zA-Z0-9._-]/g, "") ||
+    "1.0.0";
+  const fallback = `Vitrify-v${safeVersion}-release.apk`;
+
+  const cleaned = rawName
+    .trim()
+    .replace(/[/\\:*?"<>|\r\n]+/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  if (!cleaned) return fallback;
+  return cleaned.toLowerCase().endsWith(".apk") ? cleaned : `${cleaned}.apk`;
 }
 
 Deno.serve(async (req: Request) => {
@@ -104,6 +121,17 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400);
     }
 
+    const mode =
+      typeof payload.mode === "string" && payload.mode.trim()
+        ? payload.mode.trim().toLowerCase()
+        : "apk";
+    if (!ALLOWED_MODES.has(mode)) {
+      return jsonResponse(
+        { ok: false, error: "Invalid mode. Must be apk, post, or photo" },
+        400,
+      );
+    }
+
     const target =
       typeof payload.target === "string" && payload.target.trim()
         ? payload.target.trim().toLowerCase()
@@ -114,25 +142,6 @@ Deno.serve(async (req: Request) => {
         400,
       );
     }
-
-    const apkUrl =
-      typeof payload.apk_url === "string" ? payload.apk_url.trim() : "";
-    if (!apkUrl || !/^https?:\/\/.+/i.test(apkUrl)) {
-      return jsonResponse(
-        { ok: false, error: "يرجى إدخال رابط تحميل الـ APK أولاً (update_url)" },
-        400,
-      );
-    }
-
-    const rawVersion =
-      typeof payload.version_name === "string" && payload.version_name.trim()
-        ? payload.version_name.trim().replace(/^v/i, "")
-        : "1.0.0";
-    const safeVersion = rawVersion.replace(/[^a-zA-Z0-9._-]/g, "") || "1.0.0";
-    const fileName = `Vitrify-v${safeVersion}-release.apk`;
-
-    const caption =
-      typeof payload.caption === "string" ? payload.caption.trim().slice(0, 1024) : "";
 
     const channelId =
       typeof payload.channel_id === "string" && payload.channel_id.trim()
@@ -151,86 +160,217 @@ Deno.serve(async (req: Request) => {
       destinations.push({ key: "group", chat_id: groupId });
     }
 
-    // 4. Fetch the .apk binary following redirects
-    const apkRes = await fetch(apkUrl, {
-      method: "GET",
-      redirect: "follow",
-      headers: {
-        "User-Agent": "Vitrify-Telegram-Publisher/1.0",
-        Accept: "application/vnd.android.package-archive, application/octet-stream, */*",
-      },
-    });
+    const rawCaption =
+      typeof payload.caption === "string" ? payload.caption.trim() : "";
+    const pinMessage = Boolean(payload.pin_message);
 
-    if (!apkRes.ok) {
+    // Optional inline button
+    const buttonText =
+      typeof payload.button_text === "string" ? payload.button_text.trim() : "";
+    const buttonUrl =
+      typeof payload.button_url === "string" ? payload.button_url.trim() : "";
+
+    let replyMarkup: { inline_keyboard: Array<Array<{ text: string; url: string }>> } | null = null;
+    if (buttonText && buttonUrl) {
+      if (!/^(https?|tg):\/\/.+/i.test(buttonUrl)) {
+        return jsonResponse(
+          { ok: false, error: "رابط الزر يجب أن يبدأ بـ https:// أو http:// أو tg://" },
+          400,
+        );
+      }
+      replyMarkup = {
+        inline_keyboard: [[{ text: buttonText, url: buttonUrl }]],
+      };
+    } else if (buttonText || buttonUrl) {
       return jsonResponse(
-        {
-          ok: false,
-          error: `تعذر تنزيل ملف الـ APK من الرابط (HTTP ${apkRes.status})`,
+        { ok: false, error: "يرجى إدخال نص الزر والرابط معاً أو تركهما فارغين" },
+        400,
+      );
+    }
+
+    // Mode-specific validation & preparation
+    let apkBuffer: ArrayBuffer | null = null;
+    let fileName: string | null = null;
+    let photoUrl = "";
+
+    if (mode === "apk") {
+      const apkUrl =
+        typeof payload.apk_url === "string" ? payload.apk_url.trim() : "";
+      if (!apkUrl || !/^https?:\/\/.+/i.test(apkUrl)) {
+        return jsonResponse(
+          { ok: false, error: "يرجى إدخال رابط تحميل الـ APK أولاً (update_url)" },
+          400,
+        );
+      }
+
+      const rawVersion =
+        typeof payload.version_name === "string" ? payload.version_name : "1.0.0";
+      const rawCustomFilename =
+        typeof payload.apk_filename === "string" ? payload.apk_filename : "";
+      fileName = sanitizeApkFilename(rawCustomFilename, rawVersion);
+
+      const apkRes = await fetch(apkUrl, {
+        method: "GET",
+        redirect: "follow",
+        headers: {
+          "User-Agent": "Vitrify-Telegram-Publisher/2.0",
+          Accept:
+            "application/vnd.android.package-archive, application/octet-stream, */*",
         },
-        400,
-      );
+      });
+
+      if (!apkRes.ok) {
+        return jsonResponse(
+          {
+            ok: false,
+            error: `تعذر تنزيل ملف الـ APK من الرابط (HTTP ${apkRes.status})`,
+          },
+          400,
+        );
+      }
+
+      apkBuffer = await apkRes.arrayBuffer();
+      if (apkBuffer.byteLength === 0) {
+        return jsonResponse(
+          { ok: false, error: "ملف الـ APK الذي تم جلبه فارغ (0 bytes)" },
+          400,
+        );
+      }
+      if (apkBuffer.byteLength > 50 * 1024 * 1024) {
+        return jsonResponse(
+          {
+            ok: false,
+            error: "حجم ملف الـ APK يتجاوز حد Telegram Bot API المباشر (50 ميجابايت)",
+          },
+          400,
+        );
+      }
+    } else if (mode === "photo") {
+      photoUrl =
+        typeof payload.photo_url === "string" ? payload.photo_url.trim() : "";
+      if (!photoUrl || !/^https?:\/\/.+/i.test(photoUrl)) {
+        return jsonResponse(
+          { ok: false, error: "يرجى إدخال رابط صورة صالح أو رفع صورة أولاً" },
+          400,
+        );
+      }
+    } else if (mode === "post") {
+      if (!rawCaption) {
+        return jsonResponse(
+          { ok: false, error: "يرجى كتابة نص المنشور أولاً" },
+          400,
+        );
+      }
     }
 
-    const apkBuffer = await apkRes.arrayBuffer();
-    if (apkBuffer.byteLength === 0) {
-      return jsonResponse(
-        { ok: false, error: "ملف الـ APK الذي تم جلبه فارغ (0 bytes)" },
-        400,
-      );
-    }
-    if (apkBuffer.byteLength > 50 * 1024 * 1024) {
-      return jsonResponse(
-        {
-          ok: false,
-          error: "حجم ملف الـ APK يتجاوز حد Telegram Bot API المباشر (50 ميجابايت)",
-        },
-        400,
-      );
-    }
-
-    // 5. Upload APK via multipart/form-data to Telegram sendDocument for each destination
-    const telegramEndpoint = `https://api.telegram.org/bot${telegramBotToken}/sendDocument`;
+    const telegramBase = `https://api.telegram.org/bot${telegramBotToken}`;
     const results: Array<{
       target: "channel" | "group";
       chat_id: string;
       ok: boolean;
       message_id?: number;
+      pinned?: boolean;
+      pin_error?: string;
       error?: string;
     }> = [];
 
     for (const dest of destinations) {
-      const formData = new FormData();
-      formData.append("chat_id", dest.chat_id);
-      if (caption) {
-        formData.append("caption", caption);
+      let tgRes: Response;
+
+      if (mode === "apk" && apkBuffer && fileName) {
+        const formData = new FormData();
+        formData.append("chat_id", dest.chat_id);
+        if (rawCaption) {
+          formData.append("caption", rawCaption.slice(0, 1024));
+          formData.append("parse_mode", "HTML");
+        }
+        if (replyMarkup) {
+          formData.append("reply_markup", JSON.stringify(replyMarkup));
+        }
+
+        const apkBlob = new Blob([apkBuffer], {
+          type: "application/vnd.android.package-archive",
+        });
+        formData.append("document", apkBlob, fileName);
+
+        tgRes = await fetch(`${telegramBase}/sendDocument`, {
+          method: "POST",
+          body: formData,
+        });
+      } else if (mode === "photo") {
+        const bodyObj: Record<string, unknown> = {
+          chat_id: dest.chat_id,
+          photo: photoUrl,
+          parse_mode: "HTML",
+        };
+        if (rawCaption) {
+          bodyObj.caption = rawCaption.slice(0, 1024);
+        }
+        if (replyMarkup) {
+          bodyObj.reply_markup = replyMarkup;
+        }
+
+        tgRes = await fetch(`${telegramBase}/sendPhoto`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(bodyObj),
+        });
+      } else {
+        const bodyObj: Record<string, unknown> = {
+          chat_id: dest.chat_id,
+          text: rawCaption.slice(0, 4096),
+          parse_mode: "HTML",
+          disable_web_page_preview: false,
+        };
+        if (replyMarkup) {
+          bodyObj.reply_markup = replyMarkup;
+        }
+
+        tgRes = await fetch(`${telegramBase}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(bodyObj),
+        });
       }
-
-      const apkBlob = new Blob([apkBuffer], {
-        type: "application/vnd.android.package-archive",
-      });
-      formData.append("document", apkBlob, fileName);
-
-      const tgRes = await fetch(telegramEndpoint, {
-        method: "POST",
-        body: formData,
-      });
 
       const tgData = await tgRes.json().catch(() => ({}));
       if (tgRes.ok && tgData?.ok) {
+        const messageId = tgData?.result?.message_id as number | undefined;
+        let pinned = false;
+        let pinError: string | undefined;
+
+        if (pinMessage && typeof messageId === "number") {
+          const pinRes = await fetch(`${telegramBase}/pinChatMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: dest.chat_id,
+              message_id: messageId,
+              disable_notification: false,
+            }),
+          });
+          const pinData = await pinRes.json().catch(() => ({}));
+          if (pinRes.ok && pinData?.ok) {
+            pinned = true;
+          } else {
+            pinError = pinData?.description || `pinChatMessage HTTP ${pinRes.status}`;
+          }
+        }
+
         results.push({
           target: dest.key,
           chat_id: dest.chat_id,
           ok: true,
-          message_id: tgData?.result?.message_id,
+          message_id: messageId,
+          ...(pinMessage ? { pinned } : {}),
+          ...(pinError ? { pin_error: pinError } : {}),
         });
       } else {
         results.push({
           target: dest.key,
           chat_id: dest.chat_id,
           ok: false,
-          error:
-            tgData?.description ||
-            `Telegram API HTTP ${tgRes.status}`,
+          error: tgData?.description || `Telegram API HTTP ${tgRes.status}`,
         });
       }
     }
@@ -242,8 +382,9 @@ Deno.serve(async (req: Request) => {
       {
         ok: anySucceeded,
         allSucceeded,
-        fileName,
-        fileSizeBytes: apkBuffer.byteLength,
+        mode,
+        ...(fileName ? { fileName } : {}),
+        ...(apkBuffer ? { fileSizeBytes: apkBuffer.byteLength } : {}),
         results,
         ...(allSucceeded
           ? {}

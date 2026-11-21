@@ -140,12 +140,13 @@ export function ConfigTab({
   const [fetchedReleaseInfo, setFetchedReleaseInfo] = useState(null);
   const [sendPushOnSave, setSendPushOnSave] = useState(false);
 
-  // Telegram Publisher v2 state (APK / Text Post / Photo + Post)
+  // Telegram Publisher v3 state (APK / Text Post / Photo + Post)
   const [tgMode, setTgMode] = useState('apk'); // 'apk' | 'post' | 'photo'
   const [tgTarget, setTgTarget] = useState('channel'); // 'channel' | 'group' | 'both'
-  const [tgApkFilename, setTgApkFilename] = useState(buildDefaultApkFilename('1.0.0'));
+  const [tgApkFilename, setTgApkFilename] = useState('');
   const [tgFilenameTouched, setTgFilenameTouched] = useState(false);
   const [tgPhotoUrl, setTgPhotoUrl] = useState('');
+  const [tgPhotoPreviewError, setTgPhotoPreviewError] = useState(false);
   const [tgUploadingPhoto, setTgUploadingPhoto] = useState(false);
   const [tgButtonText, setTgButtonText] = useState('');
   const [tgButtonUrl, setTgButtonUrl] = useState('');
@@ -163,13 +164,15 @@ export function ConfigTab({
   const [deleteFaqTarget, setDeleteFaqTarget] = useState(null);
   const [deletingFaq, setDeletingFaq] = useState(false);
 
-  const cloudWallpapers = useMemo(
-    () =>
-      wallpapers.filter(
-        (w) => typeof w.image_url === 'string' && /^https?:\/\//i.test(w.image_url),
-      ),
-    [wallpapers],
-  );
+  const cloudWallpapers = useMemo(() => {
+    if (!Array.isArray(wallpapers)) return [];
+    return wallpapers.filter(
+      (w) =>
+        w &&
+        typeof w.image_url === 'string' &&
+        /^https?:\/\//i.test(w.image_url.trim()),
+    );
+  }, [wallpapers]);
 
   useEffect(() => {
     if (config) {
@@ -209,7 +212,7 @@ export function ConfigTab({
     }
   }, [config]);
 
-  // Auto-sync Telegram caption & default APK filename with version unless manually edited
+  // Auto-sync Telegram caption with version unless manually edited
   useEffect(() => {
     if (!tgCaptionTouched) {
       setTgCaption(
@@ -221,11 +224,16 @@ export function ConfigTab({
     }
   }, [form.latest_version_name, form.update_changelog_ar, tgCaptionTouched]);
 
+  // Pre-fill default APK filename (WITHOUT -release) only if untouched by user
   useEffect(() => {
     if (!tgFilenameTouched) {
       setTgApkFilename(buildDefaultApkFilename(form.latest_version_name));
     }
   }, [form.latest_version_name, tgFilenameTouched]);
+
+  useEffect(() => {
+    setTgPhotoPreviewError(false);
+  }, [tgPhotoUrl]);
 
   async function handleFetchLatestGithubRelease() {
     setFetchingRelease(true);
@@ -399,16 +407,180 @@ export function ConfigTab({
     }
   }
 
+  function applyTelegramTemplate(templateKey) {
+    setTgCaptionTouched(true);
+    if (templateKey === 'update') {
+      setTgCaption(
+        buildDefaultTelegramCaption(
+          form.latest_version_name,
+          form.update_changelog_ar,
+        ),
+      );
+      return;
+    }
+    if (templateKey === 'promo') {
+      setTgCaption(buildPromoTemplateCaption());
+      return;
+    }
+    if (templateKey === 'wallpaper') {
+      setTgCaption(buildNewWallpaperTemplateCaption());
+    }
+  }
+
+  async function handleUploadTelegramPhoto(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const normalizedType =
+        file.type === 'image/jpg' ? 'image/jpeg' : file.type;
+      const ext = getExtensionFromFile(file);
+      const isAllowedByExt = ['jpg', 'jpeg', 'png', 'webp'].includes(ext);
+
+      if (normalizedType) {
+        const validationErr = validateImageFile(
+          normalizedType === file.type
+            ? file
+            : { type: normalizedType, size: file.size, name: file.name },
+        );
+        if (validationErr) {
+          notify(validationErr, 'error');
+          return;
+        }
+      } else if (!isAllowedByExt) {
+        notify('الصيغة غير مدعومة. الصيغ المسموحة: JPG, PNG, WebP', 'error');
+        return;
+      }
+
+      if (file.size > 10 * 1024 * 1024) {
+        notify('حجم الصورة يتجاوز حد تيليجرام المباشر للصور (10 ميجابايت)', 'error');
+        return;
+      }
+
+      const contentType =
+        normalizedType ||
+        (ext === 'png'
+          ? 'image/png'
+          : ext === 'webp'
+            ? 'image/webp'
+            : 'image/jpeg');
+
+      setTgUploadingPhoto(true);
+      const storagePath = `telegram-uploads/${generateUniqueId()}.${ext}`;
+      const { error: uploadError } = await supabase.storage
+        .from(WALLPAPERS_BUCKET)
+        .upload(storagePath, file, {
+          contentType,
+          cacheControl: '3600',
+          upsert: true,
+        });
+
+      if (uploadError) {
+        throw new Error(uploadError.message || 'فشل رفع الصورة إلى التخزين السحابي');
+      }
+
+      const { data: urlData } = supabase.storage
+        .from(WALLPAPERS_BUCKET)
+        .getPublicUrl(storagePath);
+
+      if (!urlData?.publicUrl) {
+        throw new Error('تعذر استخراج الرابط العام للصورة المرفوعة');
+      }
+
+      setTgPhotoUrl(urlData.publicUrl);
+      setTgPhotoPreviewError(false);
+      notify('تم رفع الصورة بنجاح وأصبحت جاهزة للنشر على تيليجرام 🖼️', 'success');
+    } catch (err) {
+      notify(`تعذر رفع الصورة: ${err.message}`, 'error');
+    } finally {
+      setTgUploadingPhoto(false);
+      e.target.value = '';
+    }
+  }
+
   async function handlePublishTelegram() {
-    const apkUrl = form.update_url.trim();
-    if (!apkUrl || !/^https?:\/\/.+/i.test(apkUrl)) {
-      notify('يرجى إدخال أو جلب رابط تحميل الـ APK المباشر (update_url) أولاً', 'error');
+    const channelId = form.telegram_channel_id.trim() || '@VitrifyApp';
+    const groupId = form.telegram_group_id.trim() || '@Vitrify_chat';
+    const caption = tgCaption.trim();
+    const buttonText = tgButtonText.trim();
+    const buttonUrl = tgButtonUrl.trim();
+
+    if ((buttonText && !buttonUrl) || (!buttonText && buttonUrl)) {
+      notify('يرجى إدخال نص الزر والرابط معاً أو تركهما فارغين', 'error');
+      return;
+    }
+    if (buttonUrl && !/^(https?|tg):\/\/.+/i.test(buttonUrl)) {
+      notify('رابط الزر يجب أن يبدأ بـ https:// أو http:// أو tg://', 'error');
       return;
     }
 
-    const channelId = form.telegram_channel_id.trim() || '@VitrifyApp';
-    const groupId = form.telegram_group_id.trim() || '@Vitrify_chat';
-    const versionName = form.latest_version_name.trim() || '1.0.0';
+    const basePayload = {
+      mode: tgMode,
+      target: tgTarget,
+      caption,
+      pin_message: Boolean(tgPinMessage),
+      channel_id: channelId,
+      group_id: groupId,
+      ...(buttonText && buttonUrl
+        ? { button_text: buttonText, button_url: buttonUrl }
+        : {}),
+    };
+
+    let requestBody;
+    let effectiveApkFilename = '';
+
+    switch (tgMode) {
+      case 'post': {
+        if (!caption) {
+          notify('يرجى كتابة نص المنشور أولاً', 'error');
+          return;
+        }
+        // Strictly text-only post: NEVER include apk_url, apk_filename, or photo_url
+        requestBody = { ...basePayload, mode: 'post' };
+        break;
+      }
+
+      case 'photo': {
+        const photoUrl = tgPhotoUrl.trim();
+        if (!photoUrl || !/^https?:\/\/.+/i.test(photoUrl)) {
+          notify('يرجى لصق رابط صورة صالح أو رفع صورة من الجهاز أولاً', 'error');
+          return;
+        }
+        // Strictly photo + caption: NEVER include apk_url or apk_filename
+        requestBody = {
+          ...basePayload,
+          mode: 'photo',
+          photo_url: photoUrl,
+        };
+        break;
+      }
+
+      case 'apk': {
+        const apkUrl = form.update_url.trim();
+        if (!apkUrl || !/^https?:\/\/.+/i.test(apkUrl)) {
+          notify(
+            'يرجى إدخال أو جلب رابط تحميل الـ APK المباشر (update_url) أولاً',
+            'error',
+          );
+          return;
+        }
+        const versionName = form.latest_version_name.trim() || '1.0.0';
+        effectiveApkFilename =
+          tgApkFilename.trim() || buildDefaultApkFilename(versionName);
+        requestBody = {
+          ...basePayload,
+          mode: 'apk',
+          apk_url: apkUrl,
+          version_name: versionName,
+          apk_filename: effectiveApkFilename,
+        };
+        break;
+      }
+
+      default:
+        notify('وضع النشر غير معروف', 'error');
+        return;
+    }
 
     setPublishingTelegram(true);
     try {
@@ -422,29 +594,31 @@ export function ConfigTab({
         .eq('id', 1);
 
       const { data, error } = await supabase.functions.invoke('publish-telegram', {
-        body: {
-          target: tgTarget,
-          apk_url: apkUrl,
-          version_name: versionName,
-          caption: tgCaption.trim(),
-          channel_id: channelId,
-          group_id: groupId,
-        },
+        body: requestBody,
       });
 
       if (error) {
-        throw new Error(error.message || 'تعذر استدعاء دالة النشر على تيليجرام');
+        let serverError = error.message || 'تعذر استدعاء دالة النشر على تيليجرام';
+        if (error.context && typeof error.context.json === 'function') {
+          const errJson = await error.context.json().catch(() => null);
+          if (errJson?.error) serverError = errJson.error;
+        }
+        throw new Error(serverError);
       }
       if (!data?.ok) {
-        throw new Error(data?.error || 'فشل إرسال ملف الـ APK إلى تيليجرام');
+        throw new Error(data?.error || 'فشل النشر على تيليجرام');
       }
 
-      const sentTargets = Array.isArray(data.results)
-        ? data.results.filter((r) => r.ok).map((r) => r.chat_id)
+      const sentResults = Array.isArray(data.results)
+        ? data.results.filter((r) => r.ok)
         : [];
+      const sentTargets = sentResults.map((r) => r.chat_id);
       const failedTargets = Array.isArray(data.results)
         ? data.results.filter((r) => !r.ok)
         : [];
+      const pinWarnings = sentResults
+        .filter((r) => r.pin_error)
+        .map((r) => `${r.chat_id}: ${r.pin_error}`);
 
       if (failedTargets.length > 0) {
         notify(
@@ -452,10 +626,23 @@ export function ConfigTab({
           'error',
         );
       } else {
-        notify(
-          `تم رفع وإرسال ${data.fileName || 'الـ APK'} إلى تيليجرام بنجاح (${sentTargets.join(' ، ')}) ✈️`,
-          'success',
-        );
+        const pinNote = pinWarnings.length > 0 ? ` (تنبيه التثبيت: ${pinWarnings.join(' | ')})` : '';
+        if (tgMode === 'apk') {
+          notify(
+            `تم رفع وإرسال ${data.fileName || effectiveApkFilename} إلى تيليجرام بنجاح (${sentTargets.join(' ، ')}) ✈️${pinNote}`,
+            'success',
+          );
+        } else if (tgMode === 'photo') {
+          notify(
+            `تم نشر الصورة والمنشور على تيليجرام بنجاح (${sentTargets.join(' ، ')}) 🖼️✈️${pinNote}`,
+            'success',
+          );
+        } else {
+          notify(
+            `تم نشر المنشور النصي على تيليجرام بنجاح (${sentTargets.join(' ، ')}) ✈️${pinNote}`,
+            'success',
+          );
+        }
       }
     } catch (err) {
       notify(`خطأ في النشر على تيليجرام: ${err.message}`, 'error');
@@ -896,12 +1083,12 @@ export function ConfigTab({
                   <label htmlFor="cfg-tg-apk-name">
                     اسم ملف التطبيق (apk_filename)
                   </label>
-                  <span className="field-hint">يُضاف .apk تلقائياً إذا لم يُكتب</span>
+                  <span className="field-hint">يُرسل بالاسم الدقيق ويُضاف .apk تلقائياً إذا لم يُكتب</span>
                 </div>
                 <input
                   id="cfg-tg-apk-name"
                   className="input mono"
-                  placeholder="Vitrify-v1.0.1.apk"
+                  placeholder={buildDefaultApkFilename(form.latest_version_name)}
                   value={tgApkFilename}
                   onChange={(e) => {
                     setTgFilenameTouched(true);
@@ -916,14 +1103,14 @@ export function ConfigTab({
               <div className="glass-subcard" style={{ padding: 14, marginBottom: 14 }}>
                 <div className="field" style={{ marginBottom: 10 }}>
                   <div className="field-label">
-                    <label htmlFor="cfg-tg-photo-url">رابط الصورة / رفع صورة مؤقتة</label>
+                    <label htmlFor="cfg-tg-photo-url">رابط الصورة أو رفع صورة من الجهاز</label>
                     <label
                       className="btn btn-secondary btn-sm"
                       style={{ cursor: tgUploadingPhoto ? 'wait' : 'pointer' }}
                     >
                       <input
                         type="file"
-                        accept="image/jpeg,image/png,image/webp"
+                        accept="image/*"
                         style={{ display: 'none' }}
                         disabled={tgUploadingPhoto}
                         onChange={handleUploadTelegramPhoto}
@@ -939,14 +1126,28 @@ export function ConfigTab({
                       )}
                     </label>
                   </div>
-                  <input
-                    id="cfg-tg-photo-url"
-                    type="url"
-                    className="input ltr"
-                    placeholder="https://..."
-                    value={tgPhotoUrl}
-                    onChange={(e) => setTgPhotoUrl(e.target.value)}
-                  />
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <input
+                      id="cfg-tg-photo-url"
+                      type="text"
+                      inputMode="url"
+                      className="input ltr"
+                      placeholder="https://example.com/photo.jpg"
+                      value={tgPhotoUrl}
+                      onChange={(e) => setTgPhotoUrl(e.target.value)}
+                    />
+                    {tgPhotoUrl.trim() && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-icon"
+                        onClick={() => setTgPhotoUrl('')}
+                        title="مسح رابط الصورة"
+                        aria-label="مسح رابط الصورة"
+                      >
+                        <X size={15} />
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {cloudWallpapers.length > 0 && (
@@ -969,22 +1170,20 @@ export function ConfigTab({
                       <option value="">— اختر خلفية سحابية —</option>
                       {cloudWallpapers.map((w) => (
                         <option key={w.id} value={w.image_url}>
-                          {w.title_ar}
+                          {w.title_ar || w.title_en || 'خلفية'}
                         </option>
                       ))}
                     </select>
                   </div>
                 )}
 
-                {tgPhotoUrl.trim() && (
+                {tgPhotoUrl.trim() && !tgPhotoPreviewError && (
                   <img
                     src={tgPhotoUrl.trim()}
                     alt="معاينة صورة المنشور"
                     className="push-preview-img"
                     style={{ maxHeight: 170 }}
-                    onError={(e) => {
-                      e.currentTarget.style.display = 'none';
-                    }}
+                    onError={() => setTgPhotoPreviewError(true)}
                   />
                 )}
               </div>
@@ -1068,7 +1267,8 @@ export function ConfigTab({
                   </label>
                   <input
                     id="cfg-tg-btn-url"
-                    type="url"
+                    type="text"
+                    inputMode="url"
                     className="input ltr"
                     placeholder="https://t.me/VitrifyApp"
                     value={tgButtonUrl}

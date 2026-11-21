@@ -86,11 +86,36 @@ function buildNewWallpaperTemplateCaption() {
   ].join('\n');
 }
 
+const UPDATE_AUDIENCE_OPTIONS = [
+  {
+    value: 'all',
+    label: 'الكل (إطلاق عام)',
+    topics: ['all_users'],
+    topicsLabel: 'all_users',
+    toastTarget: 'جميع المستخدمين',
+  },
+  {
+    value: 'lab',
+    label: 'المختبر والمطورين (Beta)',
+    topics: ['lab_users', 'dev_users'],
+    topicsLabel: 'lab_users + dev_users',
+    toastTarget: 'المختبر والمطورين (Beta)',
+  },
+  {
+    value: 'dev',
+    label: 'المطورين فقط (اختبار داخلي)',
+    topics: ['dev_users'],
+    topicsLabel: 'dev_users',
+    toastTarget: 'المطورين فقط',
+  },
+];
+
 const DEFAULT_CONFIG = {
   latest_version_code: 1,
   latest_version_name: '1.0.0',
   min_supported_version_code: 1,
   is_force_update: false,
+  update_target_audience: 'all',
   update_url: '',
   update_changelog_ar: '',
   maintenance_mode: false,
@@ -185,6 +210,11 @@ export function ConfigTab({
         latest_version_name: vName,
         min_supported_version_code: config.min_supported_version_code ?? 1,
         is_force_update: Boolean(config.is_force_update),
+        update_target_audience: ['all', 'lab', 'dev'].includes(
+          config.update_target_audience,
+        )
+          ? config.update_target_audience
+          : 'all',
         update_url: config.update_url ?? '',
         update_changelog_ar: vLog,
         maintenance_mode: Boolean(config.maintenance_mode),
@@ -326,6 +356,12 @@ export function ConfigTab({
       const cleanTerms = form.terms_ar.trim();
       const termsChanged = cleanTerms !== (initialTerms || '').trim();
 
+      const safeUpdateAudience = ['all', 'lab', 'dev'].includes(
+        form.update_target_audience,
+      )
+        ? form.update_target_audience
+        : 'all';
+
       const payload = {
         id: 1,
         latest_version_code: Math.max(1, Number(form.latest_version_code) || 1),
@@ -335,6 +371,7 @@ export function ConfigTab({
           Number(form.min_supported_version_code) || 1,
         ),
         is_force_update: Boolean(form.is_force_update),
+        update_target_audience: safeUpdateAudience,
         update_url: form.update_url.trim(),
         update_changelog_ar: form.update_changelog_ar.trim(),
         maintenance_mode: Boolean(form.maintenance_mode),
@@ -363,34 +400,51 @@ export function ConfigTab({
       if (error) throw error;
 
       if (subTab === 'update' && sendPushOnSave) {
+        const audienceMeta =
+          UPDATE_AUDIENCE_OPTIONS.find((opt) => opt.value === safeUpdateAudience) ||
+          UPDATE_AUDIENCE_OPTIONS[0];
         const pushTitle = `تحديث جديد لـ Vitrify ${payload.latest_version_name} متاح الآن ✨`;
         const pushBody =
           payload.update_changelog_ar ||
           'اضغط لتنزيل وتثبيت التحديث الجديد مباشرة.';
 
-        const { data: pushRes, error: pushErr } = await supabase.functions.invoke(
-          'send-push',
-          {
-            body: {
-              topic: 'all_users',
-              title: pushTitle,
-              body: pushBody,
-              deep_link: 'vitrify://updates',
-              also_silent_sync: true,
-            },
-          },
+        const pushResults = await Promise.all(
+          audienceMeta.topics.map(async (topic) => {
+            const { data: pushRes, error: pushErr } =
+              await supabase.functions.invoke('send-push', {
+                body: {
+                  topic,
+                  title: pushTitle,
+                  body: pushBody,
+                  deep_link: 'vitrify://updates',
+                  also_silent_sync: true,
+                },
+              });
+            return {
+              topic,
+              ok: !pushErr && Boolean(pushRes?.ok),
+              error:
+                pushErr?.message ||
+                pushRes?.details ||
+                pushRes?.error ||
+                null,
+            };
+          }),
         );
 
-        if (pushErr || !pushRes?.ok) {
-          triggerSilentSync({ topic: 'all_users' });
+        const failedPushes = pushResults.filter((r) => !r.ok);
+        if (failedPushes.length > 0) {
+          await Promise.all(
+            failedPushes.map((f) => triggerSilentSync({ topic: f.topic })),
+          );
           notify(
-            `تم حفظ الإعدادات لكن تعذر إرسال إشعار التحديث: ${pushErr?.message || pushRes?.details || pushRes?.error || 'خطأ غير معروف'}`,
+            `تم حفظ الإعدادات لكن تعذر إرسال إشعار التحديث إلى (${failedPushes.map((f) => f.topic).join(' ، ')}): ${failedPushes.map((f) => f.error || 'خطأ غير معروف').join(' | ')}`,
             'error',
           );
         } else {
           setSendPushOnSave(false);
           notify(
-            `تم حفظ الإعدادات وإرسال إشعار التحديث (${payload.latest_version_name}) لجميع المستخدمين ✨`,
+            `تم حفظ الإعدادات وإرسال إشعار التحديث (${payload.latest_version_name}) إلى ${audienceMeta.toastTarget} (${audienceMeta.topicsLabel}) ✨`,
             'success',
           );
         }
@@ -954,6 +1008,33 @@ export function ConfigTab({
               />
             </div>
 
+            <div className="field" style={{ marginBottom: 15 }}>
+              <span className="field-label">
+                الجمهور المستهدف للتحديث (Update Target Audience)
+                <span className="badge badge-neutral mono">
+                  {(
+                    UPDATE_AUDIENCE_OPTIONS.find(
+                      (o) => o.value === form.update_target_audience,
+                    ) || UPDATE_AUDIENCE_OPTIONS[0]
+                  ).topicsLabel}
+                </span>
+              </span>
+              <div className="filter-strip" style={{ marginBottom: 0 }}>
+                {UPDATE_AUDIENCE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    className={`chip${form.update_target_audience === opt.value ? ' active' : ''}`}
+                    onClick={() =>
+                      setForm((p) => ({ ...p, update_target_audience: opt.value }))
+                    }
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div className="switch-row">
                 <div className="switch-meta">
@@ -977,10 +1058,18 @@ export function ConfigTab({
                 <div className="switch-meta">
                   <span className="switch-title">
                     <Bell size={16} color={sendPushOnSave ? 'var(--emerald)' : 'var(--text-secondary)'} />
-                    إرسال إشعار فوري للجميع بالتحديث الجديد عند الحفظ
+                    إرسال إشعار فوري بالتحديث عند الحفظ
                   </span>
                   <span className="switch-desc">
-                    يرسل إشعار FCM تلقائياً لـ <span className="mono">all_users</span> مع توجيه مباشر إلى{' '}
+                    يرسل إشعار FCM تلقائياً لـ{' '}
+                    <span className="mono">
+                      {(
+                        UPDATE_AUDIENCE_OPTIONS.find(
+                          (o) => o.value === form.update_target_audience,
+                        ) || UPDATE_AUDIENCE_OPTIONS[0]
+                      ).topicsLabel}
+                    </span>{' '}
+                    فقط مع توجيه مباشر إلى{' '}
                     <span className="mono">vitrify://updates</span>
                   </span>
                 </div>
@@ -988,7 +1077,7 @@ export function ConfigTab({
                   checked={sendPushOnSave}
                   tone="emerald"
                   onChange={setSendPushOnSave}
-                  ariaLabel="إرسال إشعار فوري للجميع بالتحديث الجديد عند الحفظ"
+                  ariaLabel="إرسال إشعار فوري بالتحديث عند الحفظ"
                 />
               </div>
             </div>

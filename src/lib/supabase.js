@@ -35,17 +35,27 @@ export async function verifyAdminAccess(userId) {
 /**
  * Triggers a data-only FCM silent sync ping so live Android apps refresh within ~1 second.
  */
-export async function triggerSilentSync({ topic = 'all_users', fcmToken = null } = {}) {
+export async function triggerSilentSync({
+  topic = 'all_users',
+  fcmToken = null,
+  fcmTokens = null,
+} = {}) {
   try {
-    const body = fcmToken
-      ? { silent_sync: true, fcm_token: fcmToken }
-      : { silent_sync: true, topic };
+    const cleanTokens = Array.isArray(fcmTokens)
+      ? fcmTokens.filter((t) => typeof t === 'string' && t.trim().length > 0)
+      : [];
+    const body =
+      cleanTokens.length > 0
+        ? { silent_sync: true, fcm_tokens: cleanTokens }
+        : fcmToken
+          ? { silent_sync: true, fcm_token: fcmToken }
+          : { silent_sync: true, topic };
 
     const { data, error } = await supabase.functions.invoke('send-push', { body });
     if (error || !data?.ok) {
       return { ok: false, error: error?.message || data?.error || 'silent_sync_failed' };
     }
-    return { ok: true, messageId: data.messageId };
+    return { ok: true, messageId: data.messageId ?? null, sentCount: data.sentCount ?? 1 };
   } catch (err) {
     return { ok: false, error: err?.message || 'silent_sync_exception' };
   }

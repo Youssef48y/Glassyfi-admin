@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Bell,
   MessageSquareMore,
@@ -14,9 +14,15 @@ import {
   Users,
   Check,
   Star,
+  Clock,
 } from 'lucide-react';
 import { supabase, triggerSilentSync } from '../lib/supabase';
-import { formatDateAr } from '../lib/formatters';
+import {
+  formatDateAr,
+  isUserOnline,
+  computeExpirySpec,
+  getPopupExpiryInfo,
+} from '../lib/formatters';
 import {
   PUSH_TOPIC_OPTIONS,
   POPUP_AUDIENCE_OPTIONS,
@@ -27,6 +33,7 @@ import {
 import { ToggleSwitch } from './ToggleSwitch';
 import { ConfirmDialog } from './ConfirmDialog';
 import { DeepLinkPicker } from './DeepLinkPicker';
+import { ExpiryPicker } from './ExpiryPicker';
 
 export function NotificationsTab({
   pushHistory,
@@ -36,6 +43,14 @@ export function NotificationsTab({
   notify,
 }) {
   const [subTab, setSubTab] = useState('push'); // 'push' | 'popups'
+
+  // Live clock tick (1s on popups for smooth countdowns, 5s on push for live online count)
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const intervalMs = subTab === 'popups' ? 1000 : 5000;
+    const timer = setInterval(() => setNowMs(Date.now()), intervalMs);
+    return () => clearInterval(timer);
+  }, [subTab]);
 
   // Push FCM Form
   const [pushTitle, setPushTitle] = useState('');
@@ -54,6 +69,7 @@ export function NotificationsTab({
   const [popupActionUrl, setPopupActionUrl] = useState('');
   const [popupAudience, setPopupAudience] = useState('all');
   const [popupMaxShows, setPopupMaxShows] = useState(1);
+  const [popupExpiry, setPopupExpiry] = useState({ amount: 0, unit: 'never' });
   const [popupActive, setPopupActive] = useState(true);
   const [selectedDeviceIds, setSelectedDeviceIds] = useState([]);
   const [userSearch, setUserSearch] = useState('');
@@ -69,6 +85,28 @@ export function NotificationsTab({
     });
     return map;
   }, [users]);
+
+  const onlineUsers = useMemo(
+    () => users.filter((u) => isUserOnline(u, nowMs)),
+    [users, nowMs],
+  );
+
+  const onlineDeviceIds = useMemo(
+    () => onlineUsers.map((u) => u.device_id).filter(Boolean),
+    [onlineUsers],
+  );
+
+  const onlineFcmTokens = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          onlineUsers
+            .map((u) => (u.fcm_token || '').trim())
+            .filter(Boolean),
+        ),
+      ),
+    [onlineUsers],
+  );
 
   const filteredPickerUsers = useMemo(() => {
     const q = userSearch.trim().toLowerCase();
@@ -101,20 +139,56 @@ export function NotificationsTab({
       return;
     }
 
+    const isOnlineOnly = pushTopic === 'online_now';
+    if (isOnlineOnly && onlineFcmTokens.length === 0) {
+      notify('لا يوجد مستخدمون متصلون الآن لديهم FCM Token نشط', 'error');
+      return;
+    }
+
     setSendingPush(true);
     try {
+      const requestBody = isOnlineOnly
+        ? {
+            title,
+            body,
+            topic: 'online_now',
+            fcm_tokens: onlineFcmTokens,
+            target_label: `${onlineFcmTokens.length} متصل الآن`,
+            image_url,
+            deep_link,
+          }
+        : {
+            title,
+            body,
+            topic: pushTopic,
+            image_url,
+            deep_link,
+          };
+
       const { data, error } = await supabase.functions.invoke('send-push', {
-        body: { title, body, topic: pushTopic, image_url, deep_link },
+        body: requestBody,
       });
 
       if (error) {
-        throw new Error(error.message || 'فشل استدعاء دالة الإشعارات');
+        let serverError = error.message || 'فشل استدعاء دالة الإشعارات';
+        if (error.context && typeof error.context.json === 'function') {
+          const errJson = await error.context.json().catch(() => null);
+          if (errJson?.error) serverError = errJson.error;
+        }
+        throw new Error(serverError);
       }
       if (!data?.ok) {
         throw new Error(data?.error || data?.details || 'فشل إرسال الإشعار عبر FCM');
       }
 
-      notify('تم إرسال الإشعار الفوري بنجاح!', 'success');
+      if (isOnlineOnly) {
+        const sent = data.sentCount ?? onlineFcmTokens.length;
+        const failNote =
+          data.failedCount > 0 ? ` (تعذر الوصول إلى ${data.failedCount} جهاز)` : '';
+        notify(`تم إرسال الإشعار إلى ${sent} مستخدم متصل الآن بنجاح!${failNote}`, 'success');
+      } else {
+        notify('تم إرسال الإشعار الفوري بنجاح!', 'success');
+      }
       setPushTitle('');
       setPushBody('');
       setPushImageUrl('');
@@ -137,10 +211,27 @@ export function NotificationsTab({
       notify('يرجى اختيار مستخدم واحد على الأقل عند تحديد "مستخدمين محددين"', 'error');
       return;
     }
+    if (popupAudience === 'online' && onlineDeviceIds.length === 0) {
+      notify('لا يوجد مستخدمون متصلون الآن لإرسال الرسالة لهم', 'error');
+      return;
+    }
+
+    const expirySpec = computeExpirySpec(popupExpiry.amount, popupExpiry.unit);
+    const expiresAt = expirySpec.buildExpiresAtIso();
 
     setSavingPopup(true);
     try {
-      const targetDevices = popupAudience === 'specific' ? selectedDeviceIds : [];
+      let targetDevices = [];
+      let dbAudience = popupAudience;
+
+      if (popupAudience === 'online') {
+        targetDevices = onlineDeviceIds;
+        dbAudience = 'all';
+      } else if (popupAudience === 'specific') {
+        targetDevices = selectedDeviceIds;
+        dbAudience = 'all';
+      }
+
       const { error } = await supabase.from('popup_announcements').insert({
         title: popupTitle.trim(),
         body: popupBody.trim(),
@@ -148,15 +239,42 @@ export function NotificationsTab({
         action_text: popupActionText.trim() || null,
         deep_link: popupDeepLink.trim() || null,
         action_url: popupActionUrl.trim() || popupDeepLink.trim() || null,
-        target_audience: popupAudience,
+        target_audience: dbAudience,
         target_device_ids: targetDevices,
-        max_shows_per_user: Number(popupMaxShows),
+        max_shows_per_user: Number(popupMaxShows ?? 1),
+        expires_at: expiresAt,
         is_active: popupActive,
       });
 
       if (error) throw error;
-      triggerSilentSync({ topic: 'all_users' });
-      notify('تم نشر الرسالة المنبثقة ومزامنة التطبيقات فورياً', 'success');
+
+      // Trigger immediate silent_sync so live devices receive the popup instantly
+      if (popupAudience === 'online' && onlineFcmTokens.length > 0) {
+        triggerSilentSync({ fcmTokens: onlineFcmTokens });
+      } else if (popupAudience === 'specific') {
+        const selectedTokens = Array.from(
+          new Set(
+            users
+              .filter((u) => selectedDeviceIds.includes(u.device_id))
+              .map((u) => (u.fcm_token || '').trim())
+              .filter(Boolean),
+          ),
+        );
+        if (selectedTokens.length > 0 && selectedTokens.length === selectedDeviceIds.length) {
+          triggerSilentSync({ fcmTokens: selectedTokens });
+        } else {
+          triggerSilentSync({ topic: 'all_users' });
+        }
+      } else {
+        triggerSilentSync({ topic: 'all_users' });
+      }
+
+      notify(
+        popupAudience === 'online'
+          ? `تم نشر الرسالة المنبثقة لـ ${targetDevices.length} مستخدم متصل الآن (${expirySpec.labelAr})`
+          : `تم نشر الرسالة المنبثقة ومزامنة التطبيقات فورياً (${expirySpec.labelAr})`,
+        'success',
+      );
       setPopupTitle('');
       setPopupBody('');
       setPopupImageUrl('');
@@ -167,6 +285,7 @@ export function NotificationsTab({
       setSelectedDeviceIds([]);
       setUserSearch('');
       setPopupMaxShows(1);
+      setPopupExpiry({ amount: 0, unit: 'never' });
       setPopupActive(true);
       await onRefresh();
     } catch (err) {
@@ -259,6 +378,12 @@ export function NotificationsTab({
                 <div className="field">
                   <label className="field-label" htmlFor="push-topic">
                     الجمهور المستهدف
+                    {pushTopic === 'online_now' && (
+                      <span className="badge badge-emerald">
+                        <span className="live-pulse-dot" style={{ width: 7, height: 7 }} />
+                        {onlineFcmTokens.length} جاهز للإرسال
+                      </span>
+                    )}
                   </label>
                   <select
                     id="push-topic"
@@ -268,11 +393,66 @@ export function NotificationsTab({
                   >
                     {PUSH_TOPIC_OPTIONS.map((t) => (
                       <option key={t.value} value={t.value}>
-                        {t.label}
+                        {t.value === 'online_now'
+                          ? `${t.label} (${onlineUsers.length})`
+                          : t.label}
                       </option>
                     ))}
                   </select>
                 </div>
+
+                {pushTopic === 'online_now' && (
+                  <div className="glass-subcard" style={{ padding: 12 }}>
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 8,
+                        flexWrap: 'wrap',
+                        marginBottom: onlineUsers.length > 0 ? 8 : 0,
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 7,
+                          fontSize: '0.8rem',
+                          fontWeight: 600,
+                          color: onlineFcmTokens.length > 0 ? 'var(--emerald)' : 'var(--amber)',
+                        }}
+                      >
+                        <span
+                          className="live-pulse-dot"
+                          style={{
+                            width: 7,
+                            height: 7,
+                            background: onlineFcmTokens.length > 0 ? 'var(--emerald)' : 'var(--amber)',
+                          }}
+                        />
+                        {onlineUsers.length === 0
+                          ? 'لا يوجد مستخدمون متصلون الآن (آخر 65 ثانية)'
+                          : `متصل الآن: ${onlineUsers.length} مستخدم (${onlineFcmTokens.length} لديهم FCM Token نشط)`}
+                      </span>
+                    </div>
+                    {onlineUsers.length > 0 && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                        {onlineUsers.slice(0, 8).map((u) => (
+                          <span
+                            key={u.device_id}
+                            className={`badge mono ${u.fcm_token ? 'badge-emerald' : 'badge-neutral'}`}
+                          >
+                            {u.user_code}
+                          </span>
+                        ))}
+                        {onlineUsers.length > 8 && (
+                          <span className="badge badge-neutral">+{onlineUsers.length - 8}</span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="field">
                   <label className="field-label" htmlFor="push-title">
@@ -327,7 +507,10 @@ export function NotificationsTab({
                   type="submit"
                   className="btn btn-primary btn-block"
                   style={{ marginTop: 4 }}
-                  disabled={sendingPush}
+                  disabled={
+                    sendingPush ||
+                    (pushTopic === 'online_now' && onlineFcmTokens.length === 0)
+                  }
                 >
                   {sendingPush ? (
                     <>
@@ -337,7 +520,9 @@ export function NotificationsTab({
                   ) : (
                     <>
                       <Send size={17} />
-                      إرسال الإشعار الآن
+                      {pushTopic === 'online_now'
+                        ? `إرسال الإشعار للمتصلين الآن (${onlineFcmTokens.length})`
+                        : 'إرسال الإشعار الآن'}
                     </>
                   )}
                 </button>
@@ -523,7 +708,9 @@ export function NotificationsTab({
                 >
                   {POPUP_AUDIENCE_OPTIONS.map((a) => (
                     <option key={a.value} value={a.value}>
-                      {a.label}
+                      {a.value === 'online'
+                        ? `${a.label} (${onlineUsers.length})`
+                        : a.label}
                     </option>
                   ))}
                 </select>
@@ -548,6 +735,44 @@ export function NotificationsTab({
               </div>
             </div>
 
+            {/* Live Online Now Auto-Filled Devices Preview */}
+            {popupAudience === 'online' && (
+              <div className="glass-subcard" style={{ padding: 14, marginBottom: 14 }}>
+                <div className="field-label" style={{ marginBottom: onlineUsers.length > 0 ? 9 : 0 }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                    <span
+                      className="live-pulse-dot"
+                      style={{
+                        width: 8,
+                        height: 8,
+                        background: onlineUsers.length > 0 ? 'var(--emerald)' : 'var(--amber)',
+                      }}
+                    />
+                    {onlineUsers.length === 0
+                      ? 'لا يوجد مستخدمون متصلون الآن (آخر 65 ثانية)'
+                      : `سيتم تعبئة target_device_ids تلقائياً لجميع المتصلين الآن (${onlineUsers.length} جهاز)`}
+                  </span>
+                  <span className={`badge ${onlineUsers.length > 0 ? 'badge-emerald' : 'badge-amber'}`}>
+                    {onlineUsers.length} متصل الآن
+                  </span>
+                </div>
+
+                {onlineUsers.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                    {onlineUsers.slice(0, 12).map((u) => (
+                      <span key={u.device_id} className="badge badge-emerald mono">
+                        {u.user_code}
+                        {u.device_model ? ` • ${u.device_model}` : ''}
+                      </span>
+                    ))}
+                    {onlineUsers.length > 12 && (
+                      <span className="badge badge-neutral">+{onlineUsers.length - 12}</span>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Searchable Multi-Select User Picker when audience === 'specific' */}
             {popupAudience === 'specific' && (
               <div className="glass-subcard" style={{ padding: 14, marginBottom: 14 }}>
@@ -559,15 +784,25 @@ export function NotificationsTab({
                   <span className="badge badge-white">{selectedDeviceIds.length} محدد</span>
                 </div>
 
-                <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
                   <input
                     type="search"
                     className="input"
-                    style={{ padding: '8px 11px', fontSize: '0.82rem' }}
+                    style={{ padding: '8px 11px', fontSize: '0.82rem', flex: 1, minWidth: 200 }}
                     placeholder="ابحث بكود المستخدم أو نوع الهاتف أو الملاحظة..."
                     value={userSearch}
                     onChange={(e) => setUserSearch(e.target.value)}
                   />
+                  {onlineDeviceIds.length > 0 && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => setSelectedDeviceIds(onlineDeviceIds)}
+                    >
+                      <span className="live-pulse-dot" style={{ width: 7, height: 7 }} />
+                      تحديد المتصلين الآن ({onlineDeviceIds.length})
+                    </button>
+                  )}
                   {selectedDeviceIds.length > 0 && (
                     <button
                       type="button"
@@ -587,6 +822,7 @@ export function NotificationsTab({
                   <div className="unlock-grid">
                     {filteredPickerUsers.map((u) => {
                       const isSel = selectedDeviceIds.includes(u.device_id);
+                      const uOnline = isUserOnline(u, nowMs);
                       return (
                         <button
                           key={u.device_id}
@@ -595,7 +831,14 @@ export function NotificationsTab({
                           onClick={() => toggleTargetDevice(u.device_id)}
                         >
                           <div style={{ minWidth: 0 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontWeight: 700 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700 }}>
+                              {uOnline && (
+                                <span
+                                  className="live-pulse-dot"
+                                  style={{ width: 7, height: 7 }}
+                                  title="متصل الآن"
+                                />
+                              )}
                               <span className="mono">{u.user_code}</span>
                               {u.is_starred && <Star size={12} color="var(--amber)" fill="currentColor" />}
                             </div>
@@ -624,6 +867,26 @@ export function NotificationsTab({
                 value={popupBody}
                 onChange={(e) => setPopupBody(e.target.value)}
                 required
+              />
+            </div>
+
+            {/* Auto-Expire Timed Popup Duration Picker */}
+            <div className="glass-subcard" style={{ padding: 14, marginBottom: 14 }}>
+              <div className="field-label" style={{ marginBottom: 9 }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <Clock size={15} color="var(--amber)" />
+                  مدة صلاحية الرسالة (Auto-Expire)
+                </span>
+                <span className="badge badge-white">
+                  {computeExpirySpec(popupExpiry.amount, popupExpiry.unit).labelAr}
+                </span>
+              </div>
+              <ExpiryPicker
+                idPrefix="pop-exp"
+                amount={popupExpiry.amount}
+                unit={popupExpiry.unit}
+                onChange={setPopupExpiry}
+                disabled={savingPopup}
               />
             </div>
 
@@ -697,9 +960,20 @@ export function NotificationsTab({
                 />
               </div>
 
-              <button type="submit" className="btn btn-primary" disabled={savingPopup}>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={
+                  savingPopup ||
+                  (popupAudience === 'online' && onlineDeviceIds.length === 0)
+                }
+              >
                 <Plus size={16} />
-                {savingPopup ? 'جاري النشر...' : 'نشر الرسالة المنبثقة'}
+                {savingPopup
+                  ? 'جاري النشر...'
+                  : popupAudience === 'online'
+                    ? `نشر الرسالة للمتصلين الآن (${onlineDeviceIds.length})`
+                    : 'نشر الرسالة المنبثقة'}
               </button>
             </div>
           </form>
@@ -719,9 +993,14 @@ export function NotificationsTab({
                   : [];
                 const isTargeted = targetedIds.length > 0 || popup.target_audience === 'specific';
                 const aud = getAudienceBadge(isTargeted ? 'specific' : popup.target_audience);
+                const expiryInfo = getPopupExpiryInfo(popup.expires_at, nowMs);
 
                 return (
-                  <article key={popup.id} className="glass-panel user-card">
+                  <article
+                    key={popup.id}
+                    className="glass-panel user-card"
+                    style={expiryInfo.expired ? { opacity: 0.72 } : undefined}
+                  >
                     {popup.image_url && (
                       <img
                         src={popup.image_url}
@@ -744,8 +1023,17 @@ export function NotificationsTab({
                         <span className="badge badge-sky">
                           <Repeat size={11} /> {maxShowsLabel(popup.max_shows_per_user ?? 1)}
                         </span>
+                        <span className={`badge ${expiryInfo.className}`}>
+                          <Clock size={11} /> {expiryInfo.label}
+                        </span>
                         <span
-                          className={`badge ${popup.is_active ? 'badge-emerald' : 'badge-neutral'}`}
+                          className={`badge ${
+                            expiryInfo.expired
+                              ? 'badge-neutral'
+                              : popup.is_active
+                                ? 'badge-emerald'
+                                : 'badge-neutral'
+                          }`}
                         >
                           {popup.is_active ? 'نشطة' : 'متوقفة'}
                         </span>

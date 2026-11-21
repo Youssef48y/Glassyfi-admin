@@ -143,3 +143,129 @@ export function getProStatusInfo(user) {
     detail: `حتى ${formatDateAr(user.pro_expires_at)}`,
   };
 }
+
+export const ONLINE_WINDOW_MS = 65_000;
+
+export function isUserOnline(user, nowMs = Date.now()) {
+  if (!user?.last_seen_at) return false;
+  const seenMs = new Date(user.last_seen_at).getTime();
+  if (Number.isNaN(seenMs)) return false;
+  return nowMs - seenMs <= ONLINE_WINDOW_MS;
+}
+
+export function computeExpirySpec(amount, unit) {
+  if (unit === 'never') {
+    return {
+      durationMs: 0,
+      labelAr: 'بدون انتهاء (دائم)',
+      buildExpiresAtIso: () => null,
+    };
+  }
+
+  const n = Math.max(1, Math.floor(Number(amount) || 1));
+  if (unit === 'seconds') {
+    const durationMs = n * 1000;
+    return {
+      durationMs,
+      labelAr: n === 1 ? 'ثانية واحدة' : `${n} ثانية`,
+      buildExpiresAtIso: (nowMs = Date.now()) =>
+        new Date(nowMs + durationMs).toISOString(),
+    };
+  }
+  if (unit === 'minutes') {
+    const durationMs = n * 60 * 1000;
+    return {
+      durationMs,
+      labelAr: n === 1 ? 'دقيقة واحدة' : `${n} دقيقة`,
+      buildExpiresAtIso: (nowMs = Date.now()) =>
+        new Date(nowMs + durationMs).toISOString(),
+    };
+  }
+  if (unit === 'hours') {
+    const durationMs = n * 60 * 60 * 1000;
+    return {
+      durationMs,
+      labelAr: n === 1 ? 'ساعة واحدة' : `${n} ساعة`,
+      buildExpiresAtIso: (nowMs = Date.now()) =>
+        new Date(nowMs + durationMs).toISOString(),
+    };
+  }
+  // days
+  const durationMs = n * 24 * 60 * 60 * 1000;
+  return {
+    durationMs,
+    labelAr: n === 1 ? 'يوم واحد' : `${n} يوم`,
+    buildExpiresAtIso: (nowMs = Date.now()) =>
+      new Date(nowMs + durationMs).toISOString(),
+  };
+}
+
+export function getPopupExpiryInfo(expiresAt, nowMs = Date.now()) {
+  if (!expiresAt) {
+    return {
+      hasExpiry: false,
+      expired: false,
+      label: 'دائمة',
+      className: 'badge-neutral',
+    };
+  }
+
+  const expMs = new Date(expiresAt).getTime();
+  if (Number.isNaN(expMs)) {
+    return {
+      hasExpiry: false,
+      expired: false,
+      label: 'دائمة',
+      className: 'badge-neutral',
+    };
+  }
+
+  const diffMs = expMs - nowMs;
+  if (diffMs <= 0) {
+    return {
+      hasExpiry: true,
+      expired: true,
+      label: 'منتهية',
+      className: 'badge-rose',
+    };
+  }
+
+  const secs = Math.ceil(diffMs / 1000);
+  if (secs < 60) {
+    return {
+      hasExpiry: true,
+      expired: false,
+      label: `تنتهي خلال ${secs} ثانية`,
+      className: 'badge-amber',
+    };
+  }
+
+  const mins = Math.ceil(secs / 60);
+  if (mins < 60) {
+    return {
+      hasExpiry: true,
+      expired: false,
+      label: `تنتهي خلال ${mins} دقيقة`,
+      className: 'badge-amber',
+    };
+  }
+
+  const hours = Math.ceil(mins / 60);
+  if (hours < 48) {
+    return {
+      hasExpiry: true,
+      expired: false,
+      label: `تنتهي خلال ${hours} ساعة`,
+      className: 'badge-amber',
+    };
+  }
+
+  const days = Math.ceil(hours / 24);
+  return {
+    hasExpiry: true,
+    expired: false,
+    label: `تنتهي خلال ${days} يوم`,
+    className: 'badge-amber',
+  };
+}
+

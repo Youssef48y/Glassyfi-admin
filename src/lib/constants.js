@@ -6,6 +6,7 @@ export const AUDIENCE_OPTIONS = [
 
 export const POPUP_AUDIENCE_OPTIONS = [
   { value: 'all', label: 'الكل (جميع المستخدمين)' },
+  { value: 'online', label: 'المتصلين الآن فقط (Online Now)' },
   { value: 'free', label: 'المجاني فقط' },
   { value: 'pro', label: 'مشتركو Pro' },
   { value: 'lab', label: 'أعضاء المختبر (Lab)' },
@@ -15,6 +16,7 @@ export const POPUP_AUDIENCE_OPTIONS = [
 
 export const PUSH_TOPIC_OPTIONS = [
   { value: 'all_users', label: 'الكل (جميع المستخدمين)' },
+  { value: 'online_now', label: 'المتصلين الآن فقط (Online Now)' },
   { value: 'pro_users', label: 'مشتركو Pro فقط' },
   { value: 'free_users', label: 'المستخدمون المجانيون فقط' },
   { value: 'lab_users', label: 'أعضاء المختبر (Lab)' },
@@ -76,6 +78,7 @@ export const SCREEN_LABELS_AR = {
 };
 
 export function getAudienceBadge(audience) {
+  if (audience === 'online') return { label: 'المتصلين الآن', className: 'badge-emerald' };
   if (audience === 'specific') return { label: 'مستخدمين محددين', className: 'badge-white' };
   if (audience === 'dev') return { label: 'مطورين فقط', className: 'badge-sky' };
   if (audience === 'lab') return { label: 'المختبر والمطورين', className: 'badge-emerald' };
@@ -85,6 +88,7 @@ export function getAudienceBadge(audience) {
 }
 
 export function getTopicLabelAr(topic) {
+  if (topic === 'online_now') return 'المتصلين الآن فقط';
   if (topic === 'pro_users') return 'Pro فقط';
   if (topic === 'free_users') return 'المجاني فقط';
   if (topic === 'lab_users') return 'المختبر';

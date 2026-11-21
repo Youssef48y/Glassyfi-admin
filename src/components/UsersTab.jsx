@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Users,
   Ticket,
@@ -37,12 +37,15 @@ import {
   getProStatusInfo,
   computeDurationSpec,
   formatDurationAr,
+  isUserOnline,
+  computeExpirySpec,
 } from '../lib/formatters';
 import { ROLE_META, MAX_SHOWS_OPTIONS } from '../lib/constants';
 import { ToggleSwitch } from './ToggleSwitch';
 import { ConfirmDialog } from './ConfirmDialog';
 import { DeepLinkPicker } from './DeepLinkPicker';
 import { DurationPicker } from './DurationPicker';
+import { ExpiryPicker } from './ExpiryPicker';
 
 export function UsersTab({
   users,
@@ -87,7 +90,15 @@ export function UsersTab({
   const [tpActionText, setTpActionText] = useState('');
   const [tpDeepLink, setTpDeepLink] = useState('');
   const [tpMaxShows, setTpMaxShows] = useState(1);
+  const [tpExpiry, setTpExpiry] = useState({ amount: 0, unit: 'never' });
   const [sendingPopup, setSendingPopup] = useState(false);
+
+  // Live clock tick so "متصل الآن" (<= 65s) updates smoothly without reload
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNowMs(Date.now()), 5000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Promo code form (flexible minutes/hours/days/lifetime)
   const [promoCodeInput, setPromoCodeInput] = useState('');
@@ -137,6 +148,7 @@ export function UsersTab({
   const filterCounts = useMemo(() => {
     const counts = {
       all: users.length,
+      online: 0,
       starred: 0,
       outdated: 0,
       pro: 0,
@@ -150,6 +162,7 @@ export function UsersTab({
     users.forEach((u) => {
       const proActive = getProStatusInfo(u).active;
       const isOutdated = (Number(u.app_version_code) || 1) < latestVersionCode;
+      if (isUserOnline(u, nowMs)) counts.online += 1;
       if (u.is_starred) counts.starred += 1;
       if (isOutdated) counts.outdated += 1;
       if (proActive) counts.pro += 1;
@@ -161,7 +174,7 @@ export function UsersTab({
       if (u.is_suspicious) counts.suspicious += 1;
     });
     return counts;
-  }, [users, latestVersionCode]);
+  }, [users, latestVersionCode, nowMs]);
 
   const filteredUsers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -169,6 +182,7 @@ export function UsersTab({
       const proActive = getProStatusInfo(u).active;
       const isOutdated = (Number(u.app_version_code) || 1) < latestVersionCode;
 
+      if (statusFilter === 'online' && !isUserOnline(u, nowMs)) return false;
       if (statusFilter === 'starred' && !u.is_starred) return false;
       if (statusFilter === 'outdated' && !isOutdated) return false;
       if (statusFilter === 'pro' && !proActive) return false;
@@ -190,7 +204,7 @@ export function UsersTab({
       }
       return true;
     });
-  }, [users, searchQuery, statusFilter, latestVersionCode]);
+  }, [users, searchQuery, statusFilter, latestVersionCode, nowMs]);
 
   function openUserDrawer(user) {
     setSelectedDeviceId(user.device_id);
@@ -213,6 +227,7 @@ export function UsersTab({
     setTpActionText('');
     setTpDeepLink('');
     setTpMaxShows(1);
+    setTpExpiry({ amount: 0, unit: 'never' });
   }
 
   async function copyText(text) {
@@ -417,6 +432,9 @@ export function UsersTab({
       return;
     }
 
+    const expirySpec = computeExpirySpec(tpExpiry.amount, tpExpiry.unit);
+    const expiresAt = expirySpec.buildExpiresAtIso();
+
     setSendingPopup(true);
     try {
       const { error } = await supabase.from('popup_announcements').insert({
@@ -426,15 +444,19 @@ export function UsersTab({
         action_text: tpActionText.trim() || null,
         deep_link: tpDeepLink.trim() || null,
         action_url: tpDeepLink.trim() || null,
-        target_audience: 'specific',
+        target_audience: 'all',
         target_device_ids: [popupTargetUser.device_id],
-        max_shows_per_user: Number(tpMaxShows),
+        max_shows_per_user: Number(tpMaxShows ?? 1),
+        expires_at: expiresAt,
         is_active: true,
       });
 
       if (error) throw error;
       await syncDevice(popupTargetUser);
-      notify(`تم إرسال رسالة منبثقة مخصصة إلى ${popupTargetUser.user_code}`, 'success');
+      notify(
+        `تم إرسال رسالة منبثقة مخصصة إلى ${popupTargetUser.user_code} (${expirySpec.labelAr})`,
+        'success',
+      );
       setPopupTargetUser(null);
       await onRefresh();
     } catch (err) {
@@ -553,6 +575,7 @@ export function UsersTab({
 
   const FILTER_PILLS = [
     { id: 'all', label: 'الكل', count: filterCounts.all },
+    { id: 'online', label: 'المتصلين الآن', count: filterCounts.online, isOnline: true },
     { id: 'starred', label: 'المميزين ★', count: filterCounts.starred },
     { id: 'outdated', label: 'لم يحدّثوا', count: filterCounts.outdated },
     { id: 'pro', label: 'Pro', count: filterCounts.pro },
@@ -616,6 +639,12 @@ export function UsersTab({
                   className={`chip${statusFilter === pill.id ? ' active' : ''}`}
                   onClick={() => setStatusFilter(pill.id)}
                 >
+                  {pill.isOnline && (
+                    <span
+                      className="live-pulse-dot"
+                      style={{ width: 7, height: 7, marginInlineEnd: 2 }}
+                    />
+                  )}
                   {pill.label}
                   <span className="chip-count">({pill.count})</span>
                 </button>
@@ -645,6 +674,7 @@ export function UsersTab({
                   : 0;
                 const userVCode = Number(user.app_version_code) || 1;
                 const isOutdated = userVCode < latestVersionCode;
+                const isOnline = isUserOnline(user, nowMs);
 
                 return (
                   <article key={user.device_id} className="glass-panel user-card">
@@ -680,6 +710,12 @@ export function UsersTab({
                       </div>
 
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                        {isOnline && (
+                          <span className="badge badge-emerald">
+                            <span className="live-pulse-dot" style={{ width: 7, height: 7 }} />
+                            متصل الآن
+                          </span>
+                        )}
                         <span className={`badge ${roleInfo.badgeClass}`}>
                           {user.role === 'dev' ? (
                             <Code2 size={11} />
@@ -999,7 +1035,15 @@ export function UsersTab({
                   <Star size={16} fill={selectedUser.is_starred ? 'currentColor' : 'none'} />
                 </button>
                 <div>
-                  <h2 className="mono">{selectedUser.user_code}</h2>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <h2 className="mono">{selectedUser.user_code}</h2>
+                    {isUserOnline(selectedUser, nowMs) && (
+                      <span className="badge badge-emerald">
+                        <span className="live-pulse-dot" style={{ width: 7, height: 7 }} />
+                        متصل الآن
+                      </span>
+                    )}
+                  </div>
                   <div style={{ fontSize: '0.77rem', color: 'var(--text-secondary)', marginTop: 2 }}>
                     {selectedUser.device_model || 'جهاز غير معروف'} • v{selectedUser.app_version || '—'} (#{selectedUser.app_version_code || 1})
                   </div>
@@ -1365,6 +1409,25 @@ export function UsersTab({
                     onChange={(e) => setTpActionText(e.target.value)}
                   />
                 </div>
+              </div>
+
+              <div className="field">
+                <span className="field-label">
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <Clock size={14} color="var(--amber)" />
+                    مدة صلاحية الرسالة (Auto-Expire)
+                  </span>
+                  <span className="badge badge-white">
+                    {computeExpirySpec(tpExpiry.amount, tpExpiry.unit).labelAr}
+                  </span>
+                </span>
+                <ExpiryPicker
+                  idPrefix="tp-exp"
+                  amount={tpExpiry.amount}
+                  unit={tpExpiry.unit}
+                  onChange={setTpExpiry}
+                  disabled={sendingPopup}
+                />
               </div>
 
               <div className="field">

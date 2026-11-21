@@ -1,4 +1,4 @@
-// Glassyfi Admin v2 - Secure FCM HTTP v1 Push Notification & Live Silent Sync Edge Function
+// Vitrify Admin v4 - Secure FCM HTTP v1 Push Notification (Topic / Single Token / Multi-Token Array) & Live Silent Sync
 // Reads Firebase credentials strictly from Supabase Edge Function Secrets.
 
 const corsHeaders: Record<string, string> = {
@@ -15,6 +15,8 @@ const ALLOWED_TOPICS = new Set([
   "lab_users",
   "dev_users",
 ]);
+
+const MAX_BATCH_CONCURRENCY = 15;
 
 function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
@@ -122,6 +124,49 @@ async function sendFcmMessage(
   return { ok: res.ok, status: res.status, data };
 }
 
+async function sendToTokenBatch(
+  tokens: string[],
+  buildBodyForToken: (token: string) => Record<string, unknown>,
+  projectId: string,
+  accessToken: string,
+) {
+  let sentCount = 0;
+  let failedCount = 0;
+  const succeededTokens: string[] = [];
+  const failedDetails: string[] = [];
+
+  for (let i = 0; i < tokens.length; i += MAX_BATCH_CONCURRENCY) {
+    const chunk = tokens.slice(i, i + MAX_BATCH_CONCURRENCY);
+    const settled = await Promise.all(
+      chunk.map(async (token) => {
+        const res = await sendFcmMessage(
+          projectId,
+          accessToken,
+          buildBodyForToken(token),
+        );
+        return { token, res };
+      }),
+    );
+
+    for (const item of settled) {
+      if (item.res.ok) {
+        sentCount += 1;
+        succeededTokens.push(item.token);
+      } else {
+        failedCount += 1;
+        const detail =
+          item.res.data?.error?.message ||
+          `HTTP ${item.res.status}`;
+        if (failedDetails.length < 5) {
+          failedDetails.push(String(detail));
+        }
+      }
+    }
+  }
+
+  return { sentCount, failedCount, succeededTokens, failedDetails };
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { status: 200, headers: corsHeaders });
@@ -215,16 +260,43 @@ Deno.serve(async (req: Request) => {
     const alsoSilentSync = Boolean(payload.also_silent_sync);
     const validateOnly = Boolean(payload.validate_only);
 
+    const hasFcmTokensField = Object.prototype.hasOwnProperty.call(
+      payload,
+      "fcm_tokens",
+    );
+    const fcmTokens: string[] = Array.isArray(payload.fcm_tokens)
+      ? Array.from(
+          new Set(
+            payload.fcm_tokens
+              .filter(
+                (t: unknown): t is string =>
+                  typeof t === "string" && t.trim().length > 0,
+              )
+              .map((t: string) => t.trim()),
+          ),
+        )
+      : [];
+
+    if (hasFcmTokensField && fcmTokens.length === 0) {
+      return jsonResponse(
+        { ok: false, error: "لا توجد أجهزة متصلة تحمل FCM Token صالحاً حالياً" },
+        400,
+      );
+    }
+
     const fcmToken =
       typeof payload.fcm_token === "string" ? payload.fcm_token.trim() : "";
-    const topic =
+    const rawTopic =
       typeof payload.topic === "string" && payload.topic.trim()
         ? payload.topic.trim()
         : "all_users";
     const targetLabel =
       typeof payload.target_label === "string" ? payload.target_label.trim() : "";
 
-    if (!fcmToken && !ALLOWED_TOPICS.has(topic)) {
+    const isMultiTokenMode = fcmTokens.length > 0;
+    const isSingleTokenMode = !isMultiTokenMode && Boolean(fcmToken);
+
+    if (!isMultiTokenMode && !isSingleTokenMode && !ALLOWED_TOPICS.has(rawTopic)) {
       return jsonResponse(
         {
           ok: false,
@@ -235,10 +307,6 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const targetField: Record<string, string> = fcmToken
-      ? { token: fcmToken }
-      : { topic };
-
     const googleAccessToken = await mintGoogleAccessToken(
       firebaseClientEmail,
       firebasePrivateKey,
@@ -246,16 +314,56 @@ Deno.serve(async (req: Request) => {
 
     // 4a. Data-only Silent Live Sync mode
     if (silentSync) {
+      const ts = String(Date.now());
+      if (isMultiTokenMode) {
+        const batch = await sendToTokenBatch(
+          fcmTokens,
+          (token) => {
+            const body: Record<string, unknown> = {
+              message: {
+                token,
+                data: { type: "sync_now", ts },
+                android: { priority: "HIGH" },
+              },
+            };
+            if (validateOnly) body.validate_only = true;
+            return body;
+          },
+          firebaseProjectId,
+          googleAccessToken,
+        );
+
+        if (batch.sentCount === 0) {
+          return jsonResponse(
+            {
+              ok: false,
+              error: "Silent sync FCM failed for all target tokens",
+              failedCount: batch.failedCount,
+              details: batch.failedDetails,
+            },
+            502,
+          );
+        }
+
+        return jsonResponse({
+          ok: true,
+          silentSync: true,
+          sentCount: batch.sentCount,
+          failedCount: batch.failedCount,
+          totalTargets: fcmTokens.length,
+          ...(validateOnly ? { validateOnly: true } : {}),
+        });
+      }
+
+      const targetField: Record<string, string> = isSingleTokenMode
+        ? { token: fcmToken }
+        : { topic: rawTopic };
+
       const syncBody: Record<string, unknown> = {
         message: {
           ...targetField,
-          data: {
-            type: "sync_now",
-            ts: String(Date.now()),
-          },
-          android: {
-            priority: "HIGH",
-          },
+          data: { type: "sync_now", ts },
+          android: { priority: "HIGH" },
         },
       };
       if (validateOnly) syncBody.validate_only = true;
@@ -284,7 +392,7 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    // 4b. Standard Push Notification (Topic or Single Device Token + optional Deep Link)
+    // 4b. Standard Push Notification (Topic, Single Token, or Multi-Token Array + optional Deep Link)
     const title = typeof payload.title === "string" ? payload.title.trim() : "";
     const body = typeof payload.body === "string" ? payload.body.trim() : "";
     const rawImageUrl =
@@ -308,7 +416,11 @@ Deno.serve(async (req: Request) => {
 
     if (rawDeepLink && !/^(glassyfi|vitrify|https?):\/\/.+/i.test(rawDeepLink)) {
       return jsonResponse(
-        { ok: false, error: "deep_link must start with vitrify://, glassyfi://, http://, or https://" },
+        {
+          ok: false,
+          error:
+            "deep_link must start with vitrify://, glassyfi://, http://, or https://",
+        },
         400,
       );
     }
@@ -318,7 +430,13 @@ Deno.serve(async (req: Request) => {
       type: "notification",
       title,
       body,
-      target: fcmToken ? "direct" : topic,
+      target: isMultiTokenMode
+        ? rawTopic === "online_now"
+          ? "online_now"
+          : "multi_direct"
+        : isSingleTokenMode
+          ? "direct"
+          : rawTopic,
     };
     const androidNotification: Record<string, string> = { sound: "default" };
 
@@ -331,6 +449,95 @@ Deno.serve(async (req: Request) => {
     if (rawDeepLink) {
       dataPayload.deep_link = rawDeepLink;
     }
+
+    // Multi-token dispatch (e.g., Online Now users)
+    if (isMultiTokenMode) {
+      const batch = await sendToTokenBatch(
+        fcmTokens,
+        (token) => {
+          const msgBody: Record<string, unknown> = {
+            message: {
+              token,
+              notification,
+              data: dataPayload,
+              android: {
+                priority: "HIGH",
+                notification: androidNotification,
+              },
+            },
+          };
+          if (validateOnly) msgBody.validate_only = true;
+          return msgBody;
+        },
+        firebaseProjectId,
+        googleAccessToken,
+      );
+
+      if (batch.sentCount === 0) {
+        return jsonResponse(
+          {
+            ok: false,
+            error: "فشل إرسال الإشعار لجميع الأجهزة المستهدفة",
+            sentCount: 0,
+            failedCount: batch.failedCount,
+            details: batch.failedDetails.join(" | "),
+          },
+          502,
+        );
+      }
+
+      if (alsoSilentSync && !validateOnly && batch.succeededTokens.length > 0) {
+        const ts = String(Date.now());
+        await sendToTokenBatch(
+          batch.succeededTokens,
+          (token) => ({
+            message: {
+              token,
+              data: { type: "sync_now", ts },
+              android: { priority: "HIGH" },
+            },
+          }),
+          firebaseProjectId,
+          googleAccessToken,
+        ).catch(() => null);
+      }
+
+      if (!validateOnly) {
+        const historyTopic =
+          rawTopic === "online_now" ? "online_now" : "direct_device";
+        await fetch(`${supabaseUrl}/rest/v1/push_history`, {
+          method: "POST",
+          headers: {
+            apikey: serviceRoleKey,
+            Authorization: `Bearer ${serviceRoleKey}`,
+            "Content-Type": "application/json",
+            Prefer: "return=minimal",
+          },
+          body: JSON.stringify({
+            title,
+            body,
+            topic: historyTopic,
+            image_url: rawImageUrl || null,
+            deep_link: rawDeepLink || null,
+            target_label:
+              targetLabel || `${batch.sentCount} جهاز`,
+          }),
+        });
+      }
+
+      return jsonResponse({
+        ok: true,
+        sentCount: batch.sentCount,
+        failedCount: batch.failedCount,
+        totalTargets: fcmTokens.length,
+        ...(validateOnly ? { validateOnly: true } : {}),
+      });
+    }
+
+    // Single token or Topic dispatch
+    const targetField: Record<string, string> = isSingleTokenMode
+      ? { token: fcmToken }
+      : { topic: rawTopic };
 
     const fcmBody: Record<string, unknown> = {
       message: {
@@ -364,7 +571,6 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Optional paired silent sync ping (e.g. Lab Approval immediate unlock)
     if (alsoSilentSync && !validateOnly) {
       await sendFcmMessage(firebaseProjectId, googleAccessToken, {
         message: {
@@ -393,10 +599,10 @@ Deno.serve(async (req: Request) => {
         body: JSON.stringify({
           title,
           body,
-          topic: fcmToken ? "direct_device" : topic,
+          topic: isSingleTokenMode ? "direct_device" : rawTopic,
           image_url: rawImageUrl || null,
           deep_link: rawDeepLink || null,
-          target_label: targetLabel || (fcmToken ? "جهاز محدد" : null),
+          target_label: targetLabel || (isSingleTokenMode ? "جهاز محدد" : null),
         }),
       });
     }

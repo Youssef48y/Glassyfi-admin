@@ -28,7 +28,7 @@ import {
   Pin,
   Link2,
 } from 'lucide-react';
-import { supabase, triggerSilentSync } from '../lib/supabase';
+import { supabase, triggerSilentSync, extractEdgeFunctionError } from '../lib/supabase';
 import { formatDateAr } from '../lib/formatters';
 import { formatFileSize } from '../lib/imageUtils';
 import { ToggleSwitch } from './ToggleSwitch';
@@ -410,14 +410,14 @@ export function ConfigTab({
                   also_silent_sync: true,
                 },
               });
+            const ok = !pushErr && Boolean(pushRes?.ok);
+            const errorMsg = ok
+              ? null
+              : await extractEdgeFunctionError(pushErr, pushRes, 'خطأ غير معروف');
             return {
               topic,
-              ok: !pushErr && Boolean(pushRes?.ok),
-              error:
-                pushErr?.message ||
-                pushRes?.details ||
-                pushRes?.error ||
-                null,
+              ok,
+              error: errorMsg,
             };
           }),
         );

@@ -35,7 +35,7 @@ import {
   ChevronDown,
   ChevronUp,
 } from 'lucide-react';
-import { supabase, triggerSilentSync } from '../lib/supabase';
+import { supabase, triggerSilentSync, extractEdgeFunctionError } from '../lib/supabase';
 import {
   formatDateAr,
   formatRelativeTimeAr,
@@ -468,7 +468,15 @@ export function UsersTab({
         },
       });
       if (error || !data?.ok) {
-        throw new Error(error?.message || data?.details || data?.error || 'فشل الإرسال');
+        const errMsg = await extractEdgeFunctionError(
+          error,
+          data,
+          'فشل إرسال الإشعار المباشر عبر FCM',
+        );
+        if (data?.unregistered) {
+          await onRefresh();
+        }
+        throw new Error(errMsg);
       }
       notify(`تم إرسال الإشعار المباشر إلى ${user.user_code}`, 'success');
       setDirectTitle('');

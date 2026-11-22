@@ -33,6 +33,64 @@ export async function verifyAdminAccess(userId) {
 }
 
 /**
+ * Extracts a readable error message from supabase.functions.invoke() responses,
+ * parsing error.context.json() on non-2xx HTTP statuses instead of showing the generic SDK message.
+ */
+export async function extractEdgeFunctionError(
+  error,
+  data,
+  fallbackMessage = 'تعذر إتمام الطلب، يرجى المحاولة مجدداً',
+) {
+  if (data && typeof data === 'object') {
+    if (typeof data.error === 'string' && data.error.trim()) {
+      return data.error.trim();
+    }
+    if (typeof data.details === 'string' && data.details.trim()) {
+      return data.details.trim();
+    }
+  }
+
+  if (error) {
+    const ctx = error.context;
+    if (ctx) {
+      try {
+        const readable = typeof ctx.clone === 'function' ? ctx.clone() : ctx;
+        if (typeof readable.json === 'function') {
+          const parsed = await readable.json();
+          if (parsed && typeof parsed === 'object') {
+            if (typeof parsed.error === 'string' && parsed.error.trim()) {
+              return parsed.error.trim();
+            }
+            if (typeof parsed.details === 'string' && parsed.details.trim()) {
+              return parsed.details.trim();
+            }
+            if (typeof parsed.message === 'string' && parsed.message.trim()) {
+              return parsed.message.trim();
+            }
+          }
+        }
+      } catch {
+        try {
+          if (typeof ctx.text === 'function') {
+            const raw = (await ctx.text())?.trim();
+            if (raw && !raw.startsWith('<')) return raw;
+          }
+        } catch {
+          // ignore body read error
+        }
+      }
+    }
+
+    const msg = typeof error.message === 'string' ? error.message.trim() : '';
+    if (msg && !/edge function returned a non-2xx status code/i.test(msg)) {
+      return msg;
+    }
+  }
+
+  return fallbackMessage;
+}
+
+/**
  * Triggers a data-only FCM silent sync ping so live Android apps refresh within ~1 second.
  */
 export async function triggerSilentSync({
@@ -53,7 +111,8 @@ export async function triggerSilentSync({
 
     const { data, error } = await supabase.functions.invoke('send-push', { body });
     if (error || !data?.ok) {
-      return { ok: false, error: error?.message || data?.error || 'silent_sync_failed' };
+      const errMsg = await extractEdgeFunctionError(error, data, 'silent_sync_failed');
+      return { ok: false, unregistered: Boolean(data?.unregistered), error: errMsg };
     }
     return { ok: true, messageId: data.messageId ?? null, sentCount: data.sentCount ?? 1 };
   } catch (err) {

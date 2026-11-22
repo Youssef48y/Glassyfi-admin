@@ -1,4 +1,4 @@
-// Vitrify Admin v4 - Secure FCM HTTP v1 Push Notification (Topic / Single Token / Multi-Token Array) & Live Silent Sync
+// Vitrify Admin v6 - Secure FCM HTTP v1 Push Notification (Topic / Single Token / Multi-Token Array) & Live Silent Sync
 // Reads Firebase credentials strictly from Supabase Edge Function Secrets.
 
 const corsHeaders: Record<string, string> = {
@@ -17,12 +17,78 @@ const ALLOWED_TOPICS = new Set([
 ]);
 
 const MAX_BATCH_CONCURRENCY = 15;
+const UNREGISTERED_ERROR_AR = "المستخدم حذف التطبيق أو التوكن غير صالح";
 
 function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
+}
+
+function extractFcmErrorInfo(status: number, fcmData: Record<string, unknown>) {
+  const errObj =
+    fcmData && typeof fcmData.error === "object" && fcmData.error !== null
+      ? (fcmData.error as Record<string, unknown>)
+      : null;
+
+  const fcmStatus = String(errObj?.status || "").toUpperCase();
+  const message = String(errObj?.message || `FCM HTTP ${status}`);
+  const detailsArr = Array.isArray(errObj?.details) ? errObj.details : [];
+  const fcmErrorCodes = detailsArr
+    .map((d) =>
+      d && typeof d === "object" && "errorCode" in d
+        ? String((d as Record<string, unknown>).errorCode || "").toUpperCase()
+        : "",
+    )
+    .filter(Boolean);
+
+  const isUnregisteredOrInvalid =
+    status === 404 ||
+    fcmStatus === "NOT_FOUND" ||
+    fcmStatus === "INVALID_ARGUMENT" ||
+    fcmErrorCodes.some((code) =>
+      ["UNREGISTERED", "INVALID_ARGUMENT", "SENDER_ID_MISMATCH"].includes(code),
+    ) ||
+    /notregistered|unregistered|not a valid fcm registration token|requested entity was not found|invalid registration/i.test(
+      message,
+    );
+
+  return {
+    isUnregisteredOrInvalid,
+    fcmStatus,
+    fcmErrorCodes,
+    message,
+  };
+}
+
+async function clearStaleFcmTokens(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  tokens: string[],
+): Promise<void> {
+  const uniqueTokens = Array.from(
+    new Set(tokens.map((t) => t.trim()).filter(Boolean)),
+  );
+  if (uniqueTokens.length === 0) return;
+
+  await Promise.all(
+    uniqueTokens.map((token) =>
+      fetch(
+        `${supabaseUrl}/rest/v1/app_users?fcm_token=eq.${encodeURIComponent(token)}`,
+        {
+          method: "PATCH",
+          headers: {
+            apikey: serviceRoleKey,
+            Authorization: `Bearer ${serviceRoleKey}`,
+            "Content-Type": "application/json",
+            Prefer: "return=minimal",
+          },
+          body: JSON.stringify({ fcm_token: null }),
+        },
+      ).catch(() => null),
+    ),
+  );
 }
 
 function base64UrlEncode(bytes: Uint8Array): string {
@@ -120,7 +186,7 @@ async function sendFcmMessage(
       body: JSON.stringify(fcmBody),
     },
   );
-  const data = await res.json().catch(() => ({}));
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   return { ok: res.ok, status: res.status, data };
 }
 
@@ -133,6 +199,7 @@ async function sendToTokenBatch(
   let sentCount = 0;
   let failedCount = 0;
   const succeededTokens: string[] = [];
+  const unregisteredTokens: string[] = [];
   const failedDetails: string[] = [];
 
   for (let i = 0; i < tokens.length; i += MAX_BATCH_CONCURRENCY) {
@@ -154,17 +221,24 @@ async function sendToTokenBatch(
         succeededTokens.push(item.token);
       } else {
         failedCount += 1;
-        const detail =
-          item.res.data?.error?.message ||
-          `HTTP ${item.res.status}`;
+        const info = extractFcmErrorInfo(item.res.status, item.res.data);
+        if (info.isUnregisteredOrInvalid) {
+          unregisteredTokens.push(item.token);
+        }
         if (failedDetails.length < 5) {
-          failedDetails.push(String(detail));
+          failedDetails.push(info.message);
         }
       }
     }
   }
 
-  return { sentCount, failedCount, succeededTokens, failedDetails };
+  return {
+    sentCount,
+    failedCount,
+    succeededTokens,
+    unregisteredTokens,
+    failedDetails,
+  };
 }
 
 Deno.serve(async (req: Request) => {
@@ -185,14 +259,14 @@ Deno.serve(async (req: Request) => {
 
     if (!supabaseUrl || !serviceRoleKey) {
       return jsonResponse(
-        { ok: false, error: "Supabase runtime environment is not configured" },
+        { ok: false, error: "إعدادات خادم Supabase غير مكتملة" },
         500,
       );
     }
 
     if (!firebaseProjectId || !firebaseClientEmail || !firebasePrivateKey) {
       return jsonResponse(
-        { ok: false, error: "Firebase secrets are not configured" },
+        { ok: false, error: "مفاتيح Firebase غير مهيأة في أسرار الدالة" },
         500,
       );
     }
@@ -214,7 +288,7 @@ Deno.serve(async (req: Request) => {
     });
 
     if (!userRes.ok) {
-      return jsonResponse({ ok: false, error: "Invalid or expired session" }, 401);
+      return jsonResponse({ ok: false, error: "انتهت الجلسة، يرجى تسجيل الدخول مجدداً" }, 401);
     }
 
     const authUser = await userRes.json();
@@ -237,7 +311,7 @@ Deno.serve(async (req: Request) => {
 
     if (!adminCheckRes.ok) {
       return jsonResponse(
-        { ok: false, error: "Failed to verify admin permissions" },
+        { ok: false, error: "تعذر التحقق من صلاحيات المدير" },
         500,
       );
     }
@@ -279,7 +353,7 @@ Deno.serve(async (req: Request) => {
 
     if (hasFcmTokensField && fcmTokens.length === 0) {
       return jsonResponse(
-        { ok: false, error: "لا توجد أجهزة متصلة تحمل FCM Token صالحاً حالياً" },
+        { ok: false, error: "لا توجد أجهزة مطابقة تحمل FCM Token صالحاً حالياً" },
         400,
       );
     }
@@ -333,11 +407,34 @@ Deno.serve(async (req: Request) => {
           googleAccessToken,
         );
 
+        if (!validateOnly && batch.unregisteredTokens.length > 0) {
+          await clearStaleFcmTokens(
+            supabaseUrl,
+            serviceRoleKey,
+            batch.unregisteredTokens,
+          );
+        }
+
         if (batch.sentCount === 0) {
+          if (batch.unregisteredTokens.length === batch.failedCount) {
+            return jsonResponse(
+              {
+                ok: false,
+                silentSync: true,
+                unregistered: true,
+                sentCount: 0,
+                failedCount: batch.failedCount,
+                error: UNREGISTERED_ERROR_AR,
+                details: batch.failedDetails.join(" | "),
+              },
+              200,
+            );
+          }
           return jsonResponse(
             {
               ok: false,
-              error: "Silent sync FCM failed for all target tokens",
+              silentSync: true,
+              error: `تعذر إرسال المزامنة الصامتة: ${batch.failedDetails.join(" | ") || "خطأ FCM"}`,
               failedCount: batch.failedCount,
               details: batch.failedDetails,
             },
@@ -350,6 +447,7 @@ Deno.serve(async (req: Request) => {
           silentSync: true,
           sentCount: batch.sentCount,
           failedCount: batch.failedCount,
+          unregisteredCount: batch.unregisteredTokens.length,
           totalTargets: fcmTokens.length,
           ...(validateOnly ? { validateOnly: true } : {}),
         });
@@ -374,11 +472,28 @@ Deno.serve(async (req: Request) => {
         syncBody,
       );
       if (!syncRes.ok) {
+        const info = extractFcmErrorInfo(syncRes.status, syncRes.data);
+        if (isSingleTokenMode && info.isUnregisteredOrInvalid) {
+          if (!validateOnly) {
+            await clearStaleFcmTokens(supabaseUrl, serviceRoleKey, [fcmToken]);
+          }
+          return jsonResponse(
+            {
+              ok: false,
+              silentSync: true,
+              unregistered: true,
+              error: UNREGISTERED_ERROR_AR,
+              details: info.message,
+            },
+            200,
+          );
+        }
+
         return jsonResponse(
           {
             ok: false,
-            error: "Silent sync FCM failed",
-            details: syncRes.data?.error?.message ?? syncRes.data,
+            error: `فشل إرسال المزامنة الصامتة: ${info.message}`,
+            details: info.message,
           },
           502,
         );
@@ -402,14 +517,14 @@ Deno.serve(async (req: Request) => {
 
     if (!title || !body) {
       return jsonResponse(
-        { ok: false, error: "Both title and body are required" },
+        { ok: false, error: "يرجى إدخال عنوان ونص الإشعار" },
         400,
       );
     }
 
     if (rawImageUrl && !/^https?:\/\/.+/i.test(rawImageUrl)) {
       return jsonResponse(
-        { ok: false, error: "image_url must be a valid http(s) URL" },
+        { ok: false, error: "رابط الصورة يجب أن يبدأ بـ http:// أو https://" },
         400,
       );
     }
@@ -419,7 +534,7 @@ Deno.serve(async (req: Request) => {
         {
           ok: false,
           error:
-            "deep_link must start with vitrify://, glassyfi://, http://, or https://",
+            "رابط التوجيه يجب أن يبدأ بـ vitrify:// أو glassyfi:// أو http(s)://",
         },
         400,
       );
@@ -450,7 +565,7 @@ Deno.serve(async (req: Request) => {
       dataPayload.deep_link = rawDeepLink;
     }
 
-    // Multi-token dispatch (e.g., Online Now users)
+    // Multi-token dispatch (e.g., Online Now / Multi-Filter Deduplicated Set)
     if (isMultiTokenMode) {
       const batch = await sendToTokenBatch(
         fcmTokens,
@@ -473,13 +588,40 @@ Deno.serve(async (req: Request) => {
         googleAccessToken,
       );
 
+      if (!validateOnly && batch.unregisteredTokens.length > 0) {
+        await clearStaleFcmTokens(
+          supabaseUrl,
+          serviceRoleKey,
+          batch.unregisteredTokens,
+        );
+      }
+
       if (batch.sentCount === 0) {
+        const allUnregistered =
+          batch.unregisteredTokens.length === batch.failedCount &&
+          batch.failedCount > 0;
+        if (allUnregistered) {
+          return jsonResponse(
+            {
+              ok: false,
+              unregistered: true,
+              sentCount: 0,
+              failedCount: batch.failedCount,
+              unregisteredCount: batch.unregisteredTokens.length,
+              error: UNREGISTERED_ERROR_AR,
+              details: batch.failedDetails.join(" | "),
+            },
+            200,
+          );
+        }
+
         return jsonResponse(
           {
             ok: false,
-            error: "فشل إرسال الإشعار لجميع الأجهزة المستهدفة",
+            error: `فشل إرسال الإشعار لجميع الأجهزة المستهدفة: ${batch.failedDetails.join(" | ") || "خطأ FCM"}`,
             sentCount: 0,
             failedCount: batch.failedCount,
+            unregisteredCount: batch.unregisteredTokens.length,
             details: batch.failedDetails.join(" | "),
           },
           502,
@@ -519,8 +661,7 @@ Deno.serve(async (req: Request) => {
             topic: historyTopic,
             image_url: rawImageUrl || null,
             deep_link: rawDeepLink || null,
-            target_label:
-              targetLabel || `${batch.sentCount} جهاز`,
+            target_label: targetLabel || `${batch.sentCount} جهاز`,
           }),
         });
       }
@@ -529,6 +670,7 @@ Deno.serve(async (req: Request) => {
         ok: true,
         sentCount: batch.sentCount,
         failedCount: batch.failedCount,
+        unregisteredCount: batch.unregisteredTokens.length,
         totalTargets: fcmTokens.length,
         ...(validateOnly ? { validateOnly: true } : {}),
       });
@@ -561,11 +703,27 @@ Deno.serve(async (req: Request) => {
     );
 
     if (!fcmRes.ok) {
+      const info = extractFcmErrorInfo(fcmRes.status, fcmRes.data);
+      if (isSingleTokenMode && info.isUnregisteredOrInvalid) {
+        if (!validateOnly) {
+          await clearStaleFcmTokens(supabaseUrl, serviceRoleKey, [fcmToken]);
+        }
+        return jsonResponse(
+          {
+            ok: false,
+            unregistered: true,
+            error: UNREGISTERED_ERROR_AR,
+            details: info.message,
+          },
+          200,
+        );
+      }
+
       return jsonResponse(
         {
           ok: false,
-          error: "FCM send failed",
-          details: fcmRes.data?.error?.message ?? fcmRes.data,
+          error: `فشل إرسال الإشعار عبر FCM: ${info.message}`,
+          details: info.message,
         },
         502,
       );

@@ -13,7 +13,7 @@ import {
   Copy,
   Check,
 } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { supabase, extractEdgeFunctionError } from '../lib/supabase';
 import { formatDateAr, formatRelativeTimeAr } from '../lib/formatters';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -93,7 +93,12 @@ export function LabFeedbackTab({
         });
 
         if (pushErr || !pushRes?.ok) {
-          notify('تمت الموافقة وتفعيل عضوية المختبر (تعذر تسليم الإشعار الفوري للهاتف)', 'info');
+          const reason = await extractEdgeFunctionError(
+            pushErr,
+            pushRes,
+            'تعذر تسليم الإشعار الفوري للهاتف',
+          );
+          notify(`تمت الموافقة وتفعيل عضوية المختبر (${reason})`, 'info');
         } else {
           notify('تمت الموافقة وإرسال إشعار الترحيب والمزامنة الفورية لهاتف العضو 🧪', 'success');
         }

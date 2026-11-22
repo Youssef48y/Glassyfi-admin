@@ -17,7 +17,7 @@ import {
   Clock,
   ShieldCheck,
 } from 'lucide-react';
-import { supabase, triggerSilentSync } from '../lib/supabase';
+import { supabase, triggerSilentSync, extractEdgeFunctionError } from '../lib/supabase';
 import {
   formatDateAr,
   getProStatusInfo,
@@ -485,16 +485,16 @@ export function NotificationsTab({
         body: requestBody,
       });
 
-      if (error) {
-        let serverError = error.message || 'فشل استدعاء دالة الإشعارات';
-        if (error.context && typeof error.context.json === 'function') {
-          const errJson = await error.context.json().catch(() => null);
-          if (errJson?.error) serverError = errJson.error;
+      if (error || !data?.ok) {
+        const errMsg = await extractEdgeFunctionError(
+          error,
+          data,
+          'فشل إرسال الإشعار عبر FCM',
+        );
+        if (data?.unregistered) {
+          await onRefresh();
         }
-        throw new Error(serverError);
-      }
-      if (!data?.ok) {
-        throw new Error(data?.error || data?.details || 'فشل إرسال الإشعار عبر FCM');
+        throw new Error(errMsg);
       }
 
       if (!singlePureTopic) {

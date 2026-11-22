@@ -34,6 +34,8 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  CheckSquare,
+  BellOff,
 } from 'lucide-react';
 import { supabase, triggerSilentSync, extractEdgeFunctionError } from '../lib/supabase';
 import {
@@ -75,6 +77,31 @@ export function UsersTab({
   const [statusFilter, setStatusFilter] = useState('all');
   const [copiedCode, setCopiedCode] = useState('');
   const [starringId, setStarringId] = useState('');
+
+  // Bulk Multi-Select Mode state
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [bulkModal, setBulkModal] = useState(null); // null | 'push' | 'popup' | 'pro' | 'ban' | 'delete'
+  const [bulkBusy, setBulkBusy] = useState(false);
+
+  // Bulk Push form
+  const [bulkPushTitle, setBulkPushTitle] = useState('');
+  const [bulkPushBody, setBulkPushBody] = useState('');
+  const [bulkPushImage, setBulkPushImage] = useState('');
+  const [bulkPushDeepLink, setBulkPushDeepLink] = useState('');
+
+  // Bulk Pop-up form
+  const [bulkPopTitle, setBulkPopTitle] = useState('');
+  const [bulkPopBody, setBulkPopBody] = useState('');
+  const [bulkPopImage, setBulkPopImage] = useState('');
+  const [bulkPopActionText, setBulkPopActionText] = useState('');
+  const [bulkPopDeepLink, setBulkPopDeepLink] = useState('');
+  const [bulkPopMaxShows, setBulkPopMaxShows] = useState(1);
+  const [bulkPopExpiry, setBulkPopExpiry] = useState({ amount: 0, unit: 'never' });
+
+  // Bulk Pro & Ban forms
+  const [bulkProDur, setBulkProDur] = useState({ amount: 30, unit: 'days' });
+  const [bulkBanReason, setBulkBanReason] = useState('');
 
   // Selected user drawer state
   const [selectedDeviceId, setSelectedDeviceId] = useState(null);
@@ -207,6 +234,7 @@ export function UsersTab({
     const counts = {
       all: users.length,
       online: 0,
+      no_push: 0,
       starred: 0,
       outdated: 0,
       pro: 0,
@@ -220,7 +248,9 @@ export function UsersTab({
     users.forEach((u) => {
       const proActive = getProStatusInfo(u).active;
       const isOutdated = (Number(u.app_version_code) || 1) < latestVersionCode;
+      const hasNoPush = !u.fcm_token || u.fcm_token.trim() === '';
       if (isUserOnline(u, nowMs)) counts.online += 1;
+      if (hasNoPush) counts.no_push += 1;
       if (u.is_starred) counts.starred += 1;
       if (isOutdated) counts.outdated += 1;
       if (proActive) counts.pro += 1;
@@ -239,8 +269,10 @@ export function UsersTab({
     return users.filter((u) => {
       const proActive = getProStatusInfo(u).active;
       const isOutdated = (Number(u.app_version_code) || 1) < latestVersionCode;
+      const hasNoPush = !u.fcm_token || u.fcm_token.trim() === '';
 
       if (statusFilter === 'online' && !isUserOnline(u, nowMs)) return false;
+      if (statusFilter === 'no_push' && !hasNoPush) return false;
       if (statusFilter === 'starred' && !u.is_starred) return false;
       if (statusFilter === 'outdated' && !isOutdated) return false;
       if (statusFilter === 'pro' && !proActive) return false;
@@ -263,6 +295,24 @@ export function UsersTab({
       return true;
     });
   }, [users, searchQuery, statusFilter, latestVersionCode, nowMs]);
+
+  // Derived bulk selection helpers
+  const selectedDeviceIdsArray = useMemo(() => Array.from(selectedIds), [selectedIds]);
+  const selectedUsersList = useMemo(
+    () => users.filter((u) => selectedIds.has(u.device_id)),
+    [users, selectedIds],
+  );
+  const selectedFcmTokens = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          selectedUsersList
+            .map((u) => (u.fcm_token || '').trim())
+            .filter(Boolean),
+        ),
+      ),
+    [selectedUsersList],
+  );
 
   function openUserDrawer(user) {
     setSelectedDeviceId(user.device_id);
@@ -671,9 +721,272 @@ export function UsersTab({
     return eventType || 'حدث';
   }
 
+  function toggleSelectionMode() {
+    setSelectionMode((prev) => {
+      if (prev) setSelectedIds(new Set());
+      return !prev;
+    });
+  }
+
+  function toggleSelectUser(deviceId) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(deviceId)) next.delete(deviceId);
+      else next.add(deviceId);
+      return next;
+    });
+  }
+
+  function selectAllFiltered() {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      filteredUsers.forEach((u) => {
+        if (u.device_id) next.add(u.device_id);
+      });
+      return next;
+    });
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+  }
+
+  async function syncSelectedDevices() {
+    if (
+      selectedFcmTokens.length > 0 &&
+      selectedFcmTokens.length === selectedDeviceIdsArray.length
+    ) {
+      await triggerSilentSync({ fcmTokens: selectedFcmTokens });
+    } else {
+      await triggerSilentSync({ topic: 'all_users' });
+    }
+  }
+
+  function openBulkModal(modalType) {
+    if (selectedIds.size === 0) {
+      notify('يرجى تحديد جهاز واحد على الأقل أولاً', 'error');
+      return;
+    }
+    if (modalType === 'push') {
+      setBulkPushTitle('');
+      setBulkPushBody('');
+      setBulkPushImage('');
+      setBulkPushDeepLink('');
+    } else if (modalType === 'popup') {
+      setBulkPopTitle('');
+      setBulkPopBody('');
+      setBulkPopImage('');
+      setBulkPopActionText('');
+      setBulkPopDeepLink('');
+      setBulkPopMaxShows(1);
+      setBulkPopExpiry({ amount: 0, unit: 'never' });
+    } else if (modalType === 'pro') {
+      setBulkProDur({ amount: 30, unit: 'days' });
+    } else if (modalType === 'ban') {
+      setBulkBanReason('');
+    }
+    setBulkModal(modalType);
+  }
+
+  async function handleBulkPush(e) {
+    e.preventDefault();
+    const title = bulkPushTitle.trim();
+    const body = bulkPushBody.trim();
+    if (!title || !body) {
+      notify('يرجى إدخال عنوان ونص الإشعار', 'error');
+      return;
+    }
+    const selectedCount = selectedDeviceIdsArray.length;
+    if (selectedFcmTokens.length === 0) {
+      notify(
+        `تم إرسال الإشعار إلى 0 من أصل ${selectedCount} جهاز (لا يوجد FCM Token لأي جهاز محدد)`,
+        'error',
+      );
+      return;
+    }
+
+    setBulkBusy(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('send-push', {
+        body: {
+          fcm_tokens: selectedFcmTokens,
+          target_label: `تحديد متعدد (${selectedCount} جهاز)`,
+          title,
+          body,
+          image_url: bulkPushImage.trim() || null,
+          deep_link: bulkPushDeepLink.trim() || null,
+        },
+      });
+
+      const sentCount = data?.sent_count ?? data?.sentCount ?? 0;
+      const unregCount = data?.unregistered_count ?? data?.unregisteredCount ?? 0;
+      const noTokenCount = Math.max(0, selectedCount - selectedFcmTokens.length);
+      const notes = [];
+      if (noTokenCount > 0) notes.push(`${noTokenCount} بدون توكن`);
+      if (unregCount > 0) notes.push(`${unregCount} حذف التطبيق/توكن منتهي`);
+      const suffix = notes.length > 0 ? ` (${notes.join(' • ')})` : '';
+
+      if (error || !data?.ok) {
+        const errMsg = await extractEdgeFunctionError(
+          error,
+          data,
+          'فشل إرسال الإشعار عبر FCM',
+        );
+        if (unregCount > 0 || data?.unregistered) {
+          await onRefresh();
+        }
+        notify(
+          `تم إرسال الإشعار إلى ${sentCount} من أصل ${selectedCount} جهاز${suffix} — ${errMsg}`,
+          'error',
+        );
+        return;
+      }
+
+      notify(
+        `تم إرسال الإشعار إلى ${sentCount} من أصل ${selectedCount} جهاز${suffix}`,
+        'success',
+      );
+      setBulkModal(null);
+      await onRefresh();
+    } catch (err) {
+      notify(`تعذر إرسال الإشعار الجماعي: ${err.message}`, 'error');
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function handleBulkPopup(e) {
+    e.preventDefault();
+    if (!bulkPopTitle.trim() || !bulkPopBody.trim()) {
+      notify('يرجى إدخال عنوان ونص الرسالة المنبثقة', 'error');
+      return;
+    }
+    const expirySpec = computeExpirySpec(bulkPopExpiry.amount, bulkPopExpiry.unit);
+    const expiresAt = expirySpec.buildExpiresAtIso();
+
+    setBulkBusy(true);
+    try {
+      const { error } = await supabase.from('popup_announcements').insert({
+        title: bulkPopTitle.trim(),
+        body: bulkPopBody.trim(),
+        image_url: bulkPopImage.trim() || null,
+        action_text: bulkPopActionText.trim() || null,
+        deep_link: bulkPopDeepLink.trim() || null,
+        action_url: bulkPopDeepLink.trim() || null,
+        target_audience: 'all',
+        target_device_ids: selectedDeviceIdsArray,
+        max_shows_per_user: Number(bulkPopMaxShows ?? 1),
+        expires_at: expiresAt,
+        is_active: true,
+      });
+      if (error) throw error;
+      await syncSelectedDevices();
+      notify(
+        `تم إرسال الرسالة المنبثقة إلى ${selectedDeviceIdsArray.length} جهاز (${expirySpec.labelAr})`,
+        'success',
+      );
+      setBulkModal(null);
+      await onRefresh();
+    } catch (err) {
+      notify(`تعذر نشر الرسالة الجماعية: ${err.message}`, 'error');
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function handleBulkPro(grant) {
+    setBulkBusy(true);
+    try {
+      if (grant) {
+        const spec = computeDurationSpec(bulkProDur.amount, bulkProDur.unit);
+        const expiresAt = spec.totalMinutes > 0 ? spec.buildExpiryIso(new Date()) : null;
+        const { error } = await supabase
+          .from('app_users')
+          .update({ is_pro: true, pro_expires_at: expiresAt })
+          .in('device_id', selectedDeviceIdsArray);
+        if (error) throw error;
+        await syncSelectedDevices();
+        notify(
+          `تم تفعيل Pro (${spec.labelAr}) لـ ${selectedDeviceIdsArray.length} جهاز بنجاح`,
+          'success',
+        );
+      } else {
+        const { error } = await supabase
+          .from('app_users')
+          .update({ is_pro: false, pro_expires_at: null, activated_via_promo: false })
+          .in('device_id', selectedDeviceIdsArray);
+        if (error) throw error;
+        await syncSelectedDevices();
+        notify(
+          `تم إلغاء اشتراك Pro عن ${selectedDeviceIdsArray.length} جهاز`,
+          'info',
+        );
+      }
+      setBulkModal(null);
+      await onRefresh();
+    } catch (err) {
+      notify(`فشل تحديث Pro الجماعي: ${err.message}`, 'error');
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function handleBulkBan(shouldBan) {
+    setBulkBusy(true);
+    try {
+      const { error } = await supabase
+        .from('app_users')
+        .update({
+          is_banned: shouldBan,
+          ban_reason: shouldBan
+            ? bulkBanReason.trim() || 'مخالفة شروط الاستخدام'
+            : null,
+        })
+        .in('device_id', selectedDeviceIdsArray);
+      if (error) throw error;
+      await syncSelectedDevices();
+      notify(
+        shouldBan
+          ? `تم حظر ${selectedDeviceIdsArray.length} جهاز بنجاح`
+          : `تم فك الحظر عن ${selectedDeviceIdsArray.length} جهاز بنجاح`,
+        shouldBan ? 'info' : 'success',
+      );
+      setBulkModal(null);
+      await onRefresh();
+    } catch (err) {
+      notify(`فشل تحديث الحظر الجماعي: ${err.message}`, 'error');
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function confirmBulkDelete() {
+    if (selectedDeviceIdsArray.length === 0) return;
+    setBulkBusy(true);
+    try {
+      const { error } = await supabase
+        .from('app_users')
+        .delete()
+        .in('device_id', selectedDeviceIdsArray);
+      if (error) throw error;
+      if (selectedDeviceId && selectedIds.has(selectedDeviceId)) {
+        setSelectedDeviceId(null);
+      }
+      notify(`تم حذف ${selectedDeviceIdsArray.length} جهاز نهائياً`, 'success');
+      setSelectedIds(new Set());
+      setBulkModal(null);
+      await onRefresh();
+    } catch (err) {
+      notify(`تعذر الحذف الجماعي: ${err.message}`, 'error');
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   const FILTER_PILLS = [
     { id: 'all', label: 'الكل', count: filterCounts.all },
     { id: 'online', label: 'المتصلين الآن', count: filterCounts.online, isOnline: true },
+    { id: 'no_push', label: 'بدون إشعارات', count: filterCounts.no_push, isNoPush: true },
     { id: 'starred', label: 'المميزين ★', count: filterCounts.starred },
     { id: 'outdated', label: 'لم يحدّثوا', count: filterCounts.outdated },
     { id: 'pro', label: 'Pro', count: filterCounts.pro },
@@ -690,7 +1003,7 @@ export function UsersTab({
       <div className="page-header">
         <div className="page-title-group">
           <h1>المستخدمين والأكواد</h1>
-          <p>تفعيل Pro بالدقيقة والساعة واليوم، تمييز الأجهزة، ملاحظات إدارية خاصة، ورسائل مخصصة</p>
+          <p>تفعيل Pro بالدقيقة والساعة واليوم، تحديد متعدد وإجراءات جماعية، ونشاط مباشر لكل جهاز</p>
         </div>
 
         <div className="segmented">
@@ -716,17 +1029,60 @@ export function UsersTab({
       {subTab === 'users' ? (
         <>
           <div className="glass-panel section-card" style={{ padding: 14 }}>
-            <div className="input-with-icon" style={{ marginBottom: 12 }}>
-              <span className="input-icon-right">
-                <Search size={16} />
-              </span>
-              <input
-                type="search"
-                className="input"
-                placeholder="ابحث بكود المستخدم (GLF-...) أو نوع الهاتف أو الملاحظة الإدارية..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 8,
+                alignItems: 'center',
+                marginBottom: 12,
+              }}
+            >
+              <div className="input-with-icon" style={{ flex: 1, minWidth: 220 }}>
+                <span className="input-icon-right">
+                  <Search size={16} />
+                </span>
+                <input
+                  type="search"
+                  className="input"
+                  placeholder="ابحث بكود المستخدم (GLF-...) أو نوع الهاتف أو الملاحظة الإدارية..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+              </div>
+
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                <button
+                  type="button"
+                  className={`btn btn-sm ${selectionMode ? 'btn-primary' : 'btn-secondary'}`}
+                  onClick={toggleSelectionMode}
+                >
+                  <CheckSquare size={14} />
+                  {selectionMode ? 'إنهاء التحديد' : 'تحديد متعدد'}
+                </button>
+
+                {selectionMode && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      disabled={filteredUsers.length === 0}
+                      onClick={selectAllFiltered}
+                    >
+                      تحديد الكل (المعروضين) ({filteredUsers.length})
+                    </button>
+                    {selectedIds.size > 0 && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        onClick={clearSelection}
+                      >
+                        إلغاء التحديد
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
 
             <div className="filter-strip" style={{ marginBottom: 0 }}>
@@ -743,6 +1099,7 @@ export function UsersTab({
                       style={{ width: 7, height: 7, marginInlineEnd: 2 }}
                     />
                   )}
+                  {pill.isNoPush && <BellOff size={12} />}
                   {pill.label}
                   <span className="chip-count">({pill.count})</span>
                 </button>
@@ -763,7 +1120,10 @@ export function UsersTab({
               <strong>لا يوجد مستخدمون مطابقون لهذا الفلتر</strong>
             </div>
           ) : (
-            <div className="cards-grid cols-2">
+            <div
+              className="cards-grid cols-2"
+              style={selectedIds.size > 0 ? { paddingBottom: 92 } : undefined}
+            >
               {filteredUsers.map((user) => {
                 const proInfo = getProStatusInfo(user);
                 const roleInfo = ROLE_META[user.role || 'normal'] || ROLE_META.normal;
@@ -777,16 +1137,31 @@ export function UsersTab({
                 const userErrorCount = appErrors.filter(
                   (e) => e.device_id === user.device_id && !e.resolved,
                 ).length;
+                const isChecked = selectedIds.has(user.device_id);
 
                 return (
                   <article
                     key={user.device_id}
-                    className="glass-panel user-card"
+                    className={`glass-panel user-card${selectionMode && isChecked ? ' selected' : ''}`}
                     style={{ cursor: 'pointer' }}
-                    onClick={() => openUserDrawer(user)}
+                    onClick={() =>
+                      selectionMode
+                        ? toggleSelectUser(user.device_id)
+                        : openUserDrawer(user)
+                    }
                   >
                     <div className="user-card-top">
                       <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                        {selectionMode && (
+                          <span
+                            className={`select-checkbox${isChecked ? ' checked' : ''}`}
+                            role="checkbox"
+                            aria-checked={isChecked}
+                          >
+                            {isChecked && <Check size={14} strokeWidth={3} />}
+                          </span>
+                        )}
+
                         <button
                           type="button"
                           className={`star-btn${user.is_starred ? ' starred' : ''}`}
@@ -1830,6 +2205,467 @@ export function UsersTab({
           </div>
         </div>
       )}
+
+      {/* Sleek Floating Bulk Action Bar */}
+      {subTab === 'users' && selectedIds.size > 0 && (
+        <div className="bulk-action-bar" role="region" aria-label="إجراءات جماعية">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span className="badge badge-white" style={{ padding: '6px 12px', fontSize: '0.82rem' }}>
+              <CheckSquare size={14} />
+              تم تحديد {selectedIds.size} جهاز
+            </span>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={clearSelection}
+            >
+              إلغاء التحديد
+            </button>
+          </div>
+
+          <div className="bulk-action-bar-actions">
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => openBulkModal('push')}
+            >
+              <Send size={13} />
+              إشعار فوري ({selectedFcmTokens.length})
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => openBulkModal('popup')}
+            >
+              <MessageSquareMore size={13} />
+              رسالة منبثقة
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => openBulkModal('pro')}
+            >
+              <Crown size={13} color="var(--amber)" />
+              تفعيل / إلغاء Pro
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => openBulkModal('ban')}
+            >
+              <Ban size={13} color="var(--rose)" />
+              حظر / فك حظر
+            </button>
+            <button
+              type="button"
+              className="btn btn-danger btn-sm"
+              onClick={() => openBulkModal('delete')}
+            >
+              <Trash2 size={13} />
+              حذف المحددين
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Action Modal 1: Bulk Push Notification */}
+      {bulkModal === 'push' && (
+        <div className="modal-backdrop" onClick={() => !bulkBusy && setBulkModal(null)}>
+          <div
+            className="modal-box"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            <div className="modal-head">
+              <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Send size={18} color="var(--emerald)" />
+                إشعار فوري جماعي ({selectedIds.size} جهاز)
+              </h2>
+              <button
+                type="button"
+                className="btn btn-ghost btn-icon"
+                disabled={bulkBusy}
+                onClick={() => setBulkModal(null)}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="glass-subcard" style={{ padding: 11, marginBottom: 14, fontSize: '0.8rem' }}>
+              <span style={{ color: selectedFcmTokens.length > 0 ? 'var(--emerald)' : 'var(--amber)', fontWeight: 600 }}>
+                الأجهزة التي تحمل FCM Token نشط: {selectedFcmTokens.length} من أصل {selectedIds.size} جهاز
+              </span>
+              {selectedIds.size > selectedFcmTokens.length && (
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.74rem', marginTop: 3 }}>
+                  يوجد {selectedIds.size - selectedFcmTokens.length} جهاز بدون توكن إشعارات (سيتم تجاهلهم تلقائياً).
+                </div>
+              )}
+            </div>
+
+            <form onSubmit={handleBulkPush} className="form-grid">
+              <div className="field">
+                <label className="field-label" htmlFor="bp-title">عنوان الإشعار *</label>
+                <input
+                  id="bp-title"
+                  className="input"
+                  placeholder="مثال: تحديث جديد أو هدية خاصة!"
+                  value={bulkPushTitle}
+                  onChange={(e) => setBulkPushTitle(e.target.value)}
+                  required
+                />
+              </div>
+
+              <div className="field">
+                <label className="field-label" htmlFor="bp-body">نص الإشعار *</label>
+                <textarea
+                  id="bp-body"
+                  className="textarea"
+                  placeholder="اكتب رسالة الإشعار الجماعي للأجهزة المحددة..."
+                  value={bulkPushBody}
+                  onChange={(e) => setBulkPushBody(e.target.value)}
+                  required
+                />
+              </div>
+
+              <LosslessImagePickerField
+                id="bp-img"
+                label="صورة مرفقة للإشعار"
+                hint="(اختياري — بدون ضغط)"
+                value={bulkPushImage}
+                onChange={setBulkPushImage}
+                notify={notify}
+                disabled={bulkBusy}
+                previewMaxHeight={140}
+              />
+
+              <DeepLinkPicker
+                id="bp-deeplink"
+                label="توجيه عند الضغط (Deep Link)"
+                value={bulkPushDeepLink}
+                onChange={setBulkPushDeepLink}
+              />
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 4 }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={bulkBusy}
+                  onClick={() => setBulkModal(null)}
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={bulkBusy || selectedFcmTokens.length === 0}
+                >
+                  {bulkBusy ? (
+                    <>
+                      <Loader2 size={15} className="spinner" /> جاري الإرسال...
+                    </>
+                  ) : (
+                    <>
+                      <Send size={15} /> إرسال إلى {selectedFcmTokens.length} جهاز
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Action Modal 2: Bulk Pop-up Announcement */}
+      {bulkModal === 'popup' && (
+        <div className="modal-backdrop" onClick={() => !bulkBusy && setBulkModal(null)}>
+          <div
+            className="modal-box"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            <div className="modal-head">
+              <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <MessageSquareMore size={18} />
+                رسالة منبثقة جماعية ({selectedIds.size} جهاز)
+              </h2>
+              <button
+                type="button"
+                className="btn btn-ghost btn-icon"
+                disabled={bulkBusy}
+                onClick={() => setBulkModal(null)}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleBulkPopup} className="form-grid">
+              <div className="field">
+                <label className="field-label" htmlFor="bpop-title">العنوان *</label>
+                <input
+                  id="bpop-title"
+                  className="input"
+                  placeholder="مثال: إعلان خاص للمجموعة المحددة"
+                  value={bulkPopTitle}
+                  onChange={(e) => setBulkPopTitle(e.target.value)}
+                  required
+                />
+              </div>
+
+              <div className="field">
+                <label className="field-label" htmlFor="bpop-body">نص الرسالة *</label>
+                <textarea
+                  id="bpop-body"
+                  className="textarea"
+                  placeholder="تظهر هذه الرسالة المنبثقة للأجهزة المحددة فقط..."
+                  value={bulkPopBody}
+                  onChange={(e) => setBulkPopBody(e.target.value)}
+                  required
+                />
+              </div>
+
+              <div className="form-grid cols-2">
+                <div className="field">
+                  <label className="field-label" htmlFor="bpop-shows">عدد مرات الظهور</label>
+                  <select
+                    id="bpop-shows"
+                    className="select"
+                    value={bulkPopMaxShows}
+                    onChange={(e) => setBulkPopMaxShows(Number(e.target.value))}
+                  >
+                    {MAX_SHOWS_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="field">
+                  <label className="field-label" htmlFor="bpop-btn">نص الزر (اختياري)</label>
+                  <input
+                    id="bpop-btn"
+                    className="input"
+                    placeholder="حسناً / افتح الآن"
+                    value={bulkPopActionText}
+                    onChange={(e) => setBulkPopActionText(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="field">
+                <span className="field-label">
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <Clock size={14} color="var(--amber)" />
+                    مدة صلاحية الرسالة (Auto-Expire)
+                  </span>
+                  <span className="badge badge-white">
+                    {computeExpirySpec(bulkPopExpiry.amount, bulkPopExpiry.unit).labelAr}
+                  </span>
+                </span>
+                <ExpiryPicker
+                  idPrefix="bpop-exp"
+                  amount={bulkPopExpiry.amount}
+                  unit={bulkPopExpiry.unit}
+                  onChange={setBulkPopExpiry}
+                  disabled={bulkBusy}
+                />
+              </div>
+
+              <LosslessImagePickerField
+                id="bpop-img"
+                label="صورة الرسالة المنبثقة"
+                hint="(اختياري — بدون ضغط)"
+                value={bulkPopImage}
+                onChange={setBulkPopImage}
+                notify={notify}
+                disabled={bulkBusy}
+                previewMaxHeight={140}
+              />
+
+              <DeepLinkPicker
+                id="bpop-deeplink"
+                label="توجيه الزر (Deep Link)"
+                value={bulkPopDeepLink}
+                onChange={setBulkPopDeepLink}
+              />
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 4 }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={bulkBusy}
+                  onClick={() => setBulkModal(null)}
+                >
+                  إلغاء
+                </button>
+                <button type="submit" className="btn btn-primary" disabled={bulkBusy}>
+                  {bulkBusy ? 'جاري النشر...' : `إرسال إلى ${selectedIds.size} جهاز الآن`}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Action Modal 3: Bulk Pro Grant / Revoke */}
+      {bulkModal === 'pro' && (
+        <div className="modal-backdrop" onClick={() => !bulkBusy && setBulkModal(null)}>
+          <div
+            className="modal-box"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            <div className="modal-head">
+              <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Crown size={18} color="var(--amber)" />
+                تفعيل / إلغاء Pro الجماعي ({selectedIds.size} جهاز)
+              </h2>
+              <button
+                type="button"
+                className="btn btn-ghost btn-icon"
+                disabled={bulkBusy}
+                onClick={() => setBulkModal(null)}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="field" style={{ marginBottom: 16 }}>
+              <span className="field-label">
+                <span>مدة اشتراك Pro</span>
+                <span className="badge badge-amber">
+                  {computeDurationSpec(bulkProDur.amount, bulkProDur.unit).labelAr}
+                </span>
+              </span>
+              <DurationPicker
+                idPrefix="bulk-pro-dur"
+                amount={bulkProDur.amount}
+                unit={bulkProDur.unit}
+                onChange={setBulkProDur}
+                disabled={bulkBusy}
+              />
+            </div>
+
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'space-between' }}>
+              <button
+                type="button"
+                className="btn btn-danger btn-sm"
+                disabled={bulkBusy}
+                onClick={() => handleBulkPro(false)}
+              >
+                إلغاء Pro عن المحددين ({selectedIds.size})
+              </button>
+
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  disabled={bulkBusy}
+                  onClick={() => setBulkModal(null)}
+                >
+                  إغلاق
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  disabled={bulkBusy}
+                  onClick={() => handleBulkPro(true)}
+                >
+                  <Crown size={14} />
+                  {bulkBusy
+                    ? 'جاري التحديث...'
+                    : `تفعيل (${computeDurationSpec(bulkProDur.amount, bulkProDur.unit).labelAr})`}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Action Modal 4: Bulk Ban / Unban */}
+      {bulkModal === 'ban' && (
+        <div className="modal-backdrop" onClick={() => !bulkBusy && setBulkModal(null)}>
+          <div
+            className="modal-box"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            <div className="modal-head">
+              <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Ban size={18} color="var(--rose)" />
+                حظر / فك حظر جماعي ({selectedIds.size} جهاز)
+              </h2>
+              <button
+                type="button"
+                className="btn btn-ghost btn-icon"
+                disabled={bulkBusy}
+                onClick={() => setBulkModal(null)}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="field" style={{ marginBottom: 16 }}>
+              <label className="field-label" htmlFor="bulk-ban-reason">
+                سبب الحظر (اختياري — يُستخدم عند الضغط على حظر)
+              </label>
+              <input
+                id="bulk-ban-reason"
+                className="input"
+                placeholder="مثال: مخالفة شروط الاستخدام..."
+                value={bulkBanReason}
+                onChange={(e) => setBulkBanReason(e.target.value)}
+                disabled={bulkBusy}
+              />
+            </div>
+
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'space-between' }}>
+              <button
+                type="button"
+                className="btn btn-emerald btn-sm"
+                disabled={bulkBusy}
+                onClick={() => handleBulkBan(false)}
+              >
+                <ShieldCheck size={14} />
+                فك الحظر عن المحددين ({selectedIds.size})
+              </button>
+
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  disabled={bulkBusy}
+                  onClick={() => setBulkModal(null)}
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-danger-solid btn-sm"
+                  disabled={bulkBusy}
+                  onClick={() => handleBulkBan(true)}
+                >
+                  <Ban size={14} />
+                  {bulkBusy ? 'جاري التنفيذ...' : `حظر ${selectedIds.size} جهاز`}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Action Modal 5: Bulk Delete Confirmation */}
+      <ConfirmDialog
+        open={bulkModal === 'delete'}
+        title="حذف الأجهزة المحددة نهائياً"
+        message={`هل أنت متأكد من حذف ${selectedIds.size} جهاز محدد نهائياً من قاعدة البيانات؟ لا يمكن التراجع عن هذا الإجراء.`}
+        confirmText={`حذف ${selectedIds.size} جهاز`}
+        busy={bulkBusy}
+        onConfirm={confirmBulkDelete}
+        onCancel={() => !bulkBusy && setBulkModal(null)}
+      />
 
       <ConfirmDialog
         open={Boolean(deleteUserTarget)}

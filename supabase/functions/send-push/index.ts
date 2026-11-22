@@ -206,27 +206,39 @@ async function sendToTokenBatch(
     const chunk = tokens.slice(i, i + MAX_BATCH_CONCURRENCY);
     const settled = await Promise.all(
       chunk.map(async (token) => {
-        const res = await sendFcmMessage(
-          projectId,
-          accessToken,
-          buildBodyForToken(token),
-        );
-        return { token, res };
+        try {
+          const res = await sendFcmMessage(
+            projectId,
+            accessToken,
+            buildBodyForToken(token),
+          );
+          return { token, res, thrown: null as string | null };
+        } catch (err) {
+          return {
+            token,
+            res: null,
+            thrown: err instanceof Error ? err.message : String(err),
+          };
+        }
       }),
     );
 
     for (const item of settled) {
-      if (item.res.ok) {
+      if (item.res?.ok) {
         sentCount += 1;
         succeededTokens.push(item.token);
       } else {
         failedCount += 1;
-        const info = extractFcmErrorInfo(item.res.status, item.res.data);
-        if (info.isUnregisteredOrInvalid) {
-          unregisteredTokens.push(item.token);
-        }
-        if (failedDetails.length < 5) {
-          failedDetails.push(info.message);
+        if (item.res) {
+          const info = extractFcmErrorInfo(item.res.status, item.res.data);
+          if (info.isUnregisteredOrInvalid) {
+            unregisteredTokens.push(item.token);
+          }
+          if (failedDetails.length < 5) {
+            failedDetails.push(info.message);
+          }
+        } else if (item.thrown && failedDetails.length < 5) {
+          failedDetails.push(item.thrown);
         }
       }
     }
@@ -415,42 +427,37 @@ Deno.serve(async (req: Request) => {
           );
         }
 
-        if (batch.sentCount === 0) {
-          if (batch.unregisteredTokens.length === batch.failedCount) {
-            return jsonResponse(
-              {
-                ok: false,
-                silentSync: true,
-                unregistered: true,
-                sentCount: 0,
-                failedCount: batch.failedCount,
-                error: UNREGISTERED_ERROR_AR,
-                details: batch.failedDetails.join(" | "),
-              },
-              200,
-            );
-          }
-          return jsonResponse(
-            {
-              ok: false,
-              silentSync: true,
-              error: `تعذر إرسال المزامنة الصامتة: ${batch.failedDetails.join(" | ") || "خطأ FCM"}`,
-              failedCount: batch.failedCount,
-              details: batch.failedDetails,
-            },
-            502,
-          );
-        }
+        const sent_count = batch.sentCount;
+        const failed_count = batch.failedCount;
+        const unregistered_count = batch.unregisteredTokens.length;
+        const allUnregistered =
+          sent_count === 0 && unregistered_count > 0 && unregistered_count === failed_count;
 
-        return jsonResponse({
-          ok: true,
-          silentSync: true,
-          sentCount: batch.sentCount,
-          failedCount: batch.failedCount,
-          unregisteredCount: batch.unregisteredTokens.length,
-          totalTargets: fcmTokens.length,
-          ...(validateOnly ? { validateOnly: true } : {}),
-        });
+        return jsonResponse(
+          {
+            ok: sent_count > 0,
+            silentSync: true,
+            sent_count,
+            failed_count,
+            unregistered_count,
+            total_tokens: fcmTokens.length,
+            sentCount: sent_count,
+            failedCount: failed_count,
+            unregisteredCount: unregistered_count,
+            totalTargets: fcmTokens.length,
+            ...(allUnregistered ? { unregistered: true } : {}),
+            ...(sent_count === 0
+              ? {
+                  error: allUnregistered
+                    ? UNREGISTERED_ERROR_AR
+                    : `تعذر إرسال المزامنة الصامتة: ${batch.failedDetails.join(" | ") || "خطأ FCM"}`,
+                  details: batch.failedDetails.join(" | "),
+                }
+              : {}),
+            ...(validateOnly ? { validateOnly: true } : {}),
+          },
+          200,
+        );
       }
 
       const targetField: Record<string, string> = isSingleTokenMode
@@ -596,35 +603,32 @@ Deno.serve(async (req: Request) => {
         );
       }
 
-      if (batch.sentCount === 0) {
-        const allUnregistered =
-          batch.unregisteredTokens.length === batch.failedCount &&
-          batch.failedCount > 0;
-        if (allUnregistered) {
-          return jsonResponse(
-            {
-              ok: false,
-              unregistered: true,
-              sentCount: 0,
-              failedCount: batch.failedCount,
-              unregisteredCount: batch.unregisteredTokens.length,
-              error: UNREGISTERED_ERROR_AR,
-              details: batch.failedDetails.join(" | "),
-            },
-            200,
-          );
-        }
+      const sent_count = batch.sentCount;
+      const failed_count = batch.failedCount;
+      const unregistered_count = batch.unregisteredTokens.length;
+      const allUnregistered =
+        sent_count === 0 && unregistered_count > 0 && unregistered_count === failed_count;
 
+      if (sent_count === 0) {
         return jsonResponse(
           {
             ok: false,
-            error: `فشل إرسال الإشعار لجميع الأجهزة المستهدفة: ${batch.failedDetails.join(" | ") || "خطأ FCM"}`,
+            ...(allUnregistered ? { unregistered: true } : {}),
+            sent_count: 0,
+            failed_count,
+            unregistered_count,
+            total_tokens: fcmTokens.length,
             sentCount: 0,
-            failedCount: batch.failedCount,
-            unregisteredCount: batch.unregisteredTokens.length,
+            failedCount: failed_count,
+            unregisteredCount: unregistered_count,
+            totalTargets: fcmTokens.length,
+            error: allUnregistered
+              ? UNREGISTERED_ERROR_AR
+              : `فشل إرسال الإشعار لجميع الأجهزة المستهدفة: ${batch.failedDetails.join(" | ") || "خطأ FCM"}`,
             details: batch.failedDetails.join(" | "),
+            ...(validateOnly ? { validateOnly: true } : {}),
           },
-          502,
+          200,
         );
       }
 
@@ -661,19 +665,26 @@ Deno.serve(async (req: Request) => {
             topic: historyTopic,
             image_url: rawImageUrl || null,
             deep_link: rawDeepLink || null,
-            target_label: targetLabel || `${batch.sentCount} جهاز`,
+            target_label: targetLabel || `${sent_count} من أصل ${fcmTokens.length} جهاز`,
           }),
         });
       }
 
-      return jsonResponse({
-        ok: true,
-        sentCount: batch.sentCount,
-        failedCount: batch.failedCount,
-        unregisteredCount: batch.unregisteredTokens.length,
-        totalTargets: fcmTokens.length,
-        ...(validateOnly ? { validateOnly: true } : {}),
-      });
+      return jsonResponse(
+        {
+          ok: true,
+          sent_count,
+          failed_count,
+          unregistered_count,
+          total_tokens: fcmTokens.length,
+          sentCount: sent_count,
+          failedCount: failed_count,
+          unregisteredCount: unregistered_count,
+          totalTargets: fcmTokens.length,
+          ...(validateOnly ? { validateOnly: true } : {}),
+        },
+        200,
+      );
     }
 
     // Single token or Topic dispatch

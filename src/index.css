@@ -2027,3 +2027,71 @@ img {
     transform: translateY(0);
   }
 }
+
+/* ==================== Bulk Multi-Select & Floating Action Bar ==================== */
+.user-card.selected {
+  border-color: rgba(255, 255, 255, 0.78);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.06) 0%,
+    rgba(39, 42, 48, 0.98) 100%
+  );
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25), var(--shadow-card);
+}
+
+.select-checkbox {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  border: 1.5px solid rgba(255, 255, 255, 0.28);
+  background: var(--bg-input);
+  color: #181a1f;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.select-checkbox.checked {
+  background: #ffffff;
+  border-color: #ffffff;
+  box-shadow: 0 2px 8px rgba(255, 255, 255, 0.22);
+}
+
+.bulk-action-bar {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 65;
+  width: min(calc(100vw - 32px), 920px);
+  padding: 12px 16px;
+  background: rgba(31, 34, 40, 0.94);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 18px;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.55), var(--glass-highlight);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  animation: slideUp 0.18s ease;
+}
+
+.bulk-action-bar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+@media (max-width: 960px) {
+  .bulk-action-bar {
+    bottom: calc(74px + env(safe-area-inset-bottom, 0px));
+    padding: 11px 12px;
+  }
+}
+

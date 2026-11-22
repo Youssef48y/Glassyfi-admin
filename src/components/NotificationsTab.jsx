@@ -491,18 +491,36 @@ export function NotificationsTab({
           data,
           'فشل إرسال الإشعار عبر FCM',
         );
-        if (data?.unregistered) {
+        if (data?.unregistered || (data?.unregistered_count ?? 0) > 0) {
           await onRefresh();
+        }
+        if (!singlePureTopic) {
+          const totalSelected = pushAudienceUnion.deviceIds.length;
+          const sentCount = data?.sent_count ?? data?.sentCount ?? 0;
+          throw new Error(
+            `تم الإرسال إلى ${sentCount} من أصل ${totalSelected} جهاز — ${errMsg}`,
+          );
         }
         throw new Error(errMsg);
       }
 
       if (!singlePureTopic) {
-        const sent = data.sentCount ?? pushAudienceUnion.fcmTokens.length;
-        const failNote =
-          data.failedCount > 0 ? ` (تعذر الوصول إلى ${data.failedCount} جهاز)` : '';
+        const totalSelected = pushAudienceUnion.deviceIds.length;
+        const sentCount =
+          data.sent_count ?? data.sentCount ?? pushAudienceUnion.fcmTokens.length;
+        const unregCount =
+          data.unregistered_count ?? data.unregisteredCount ?? 0;
+        const noTokenCount = Math.max(
+          0,
+          totalSelected - pushAudienceUnion.fcmTokens.length,
+        );
+        const notes = [];
+        if (noTokenCount > 0) notes.push(`${noTokenCount} بدون توكن`);
+        if (unregCount > 0) notes.push(`${unregCount} حذف التطبيق/توكن منتهي`);
+        const suffix = notes.length > 0 ? ` (${notes.join(' • ')})` : '';
+
         notify(
-          `تم إرسال الإشعار إلى ${sent} جهاز فريد بدون تكرار (${pushAudienceUnion.summaryLabel})!${failNote}`,
+          `تم الإرسال إلى ${sentCount} من أصل ${totalSelected} جهاز${suffix}`,
           'success',
         );
       } else {

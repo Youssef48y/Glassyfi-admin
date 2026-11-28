@@ -40,8 +40,12 @@ import { ConfirmDialog } from './ConfirmDialog';
 const WALLPAPER_TYPES = [
   { value: 'depth', label: 'عمق Depth', icon: Layers },
   { value: 'dual_day_night', label: 'نهار وليل Dual', icon: Sun },
+  { value: 'depth_dual_day_night', label: 'عمق + نهار وليل', icon: Layers },
   { value: 'standard', label: 'عادية Standard', icon: ImageIcon },
 ];
+
+const hasNightVariant = (type) => type === 'dual_day_night' || type === 'depth_dual_day_night';
+const hasDepthSupport = (type) => type === 'depth' || type === 'depth_dual_day_night';
 
 const INITIAL_FORM = {
   title_ar: '',
@@ -74,6 +78,7 @@ export function WallpapersTab({
   // Filters: primary pills ('all' | 'builtin' | 'cloud' | 'hidden' | 'pro')
   const [primaryFilter, setPrimaryFilter] = useState('all');
   const [selectedCategory, setSelectedCategory] = useState('all');
+  const [selectedType, setSelectedType] = useState('all');
   const [selectedAudience, setSelectedAudience] = useState('all_filter');
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -136,6 +141,20 @@ export function WallpapersTab({
     return { all: wallpapers.length, builtin, cloud, hidden, pro };
   }, [wallpapers]);
 
+  const typeCounts = useMemo(() => {
+    let depth = 0;
+    let dual = 0;
+    let combined = 0;
+    let standard = 0;
+    wallpapers.forEach((w) => {
+      if (hasDepthSupport(w.wallpaper_type)) depth += 1;
+      if (hasNightVariant(w.wallpaper_type)) dual += 1;
+      if (w.wallpaper_type === 'depth_dual_day_night') combined += 1;
+      if (w.wallpaper_type === 'standard' || w.wallpaper_type === 'static') standard += 1;
+    });
+    return { all: wallpapers.length, depth, dual, combined, standard };
+  }, [wallpapers]);
+
   const filteredWallpapers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return wallpapers.filter((item) => {
@@ -145,6 +164,25 @@ export function WallpapersTab({
       if (primaryFilter === 'pro' && !item.is_pro) return false;
 
       if (selectedCategory !== 'all' && item.category_slug !== selectedCategory) {
+        return false;
+      }
+      if (selectedType === 'depth' && !hasDepthSupport(item.wallpaper_type)) {
+        return false;
+      }
+      if (selectedType === 'dual_day_night' && !hasNightVariant(item.wallpaper_type)) {
+        return false;
+      }
+      if (
+        selectedType === 'depth_dual_day_night' &&
+        item.wallpaper_type !== 'depth_dual_day_night'
+      ) {
+        return false;
+      }
+      if (
+        selectedType === 'standard' &&
+        item.wallpaper_type !== 'standard' &&
+        item.wallpaper_type !== 'static'
+      ) {
         return false;
       }
       if (selectedAudience !== 'all_filter' && (item.target_audience || 'all') !== selectedAudience) {
@@ -158,7 +196,14 @@ export function WallpapersTab({
       }
       return true;
     });
-  }, [wallpapers, primaryFilter, selectedCategory, selectedAudience, searchQuery]);
+  }, [
+    wallpapers,
+    primaryFilter,
+    selectedCategory,
+    selectedType,
+    selectedAudience,
+    searchQuery,
+  ]);
 
   async function copyDeepLink(wp) {
     const keyOrId = wp.is_builtin && wp.builtin_asset_key ? wp.builtin_asset_key : wp.id;
@@ -241,11 +286,16 @@ export function WallpapersTab({
       return;
     }
     if (!dayFile) {
-      notify('يرجى اختيار الصورة الأصلية للخلفية', 'error');
+      notify(
+        hasNightVariant(form.wallpaper_type)
+          ? 'يرجى اختيار صورة النهار الأصلية للخلفية'
+          : 'يرجى اختيار الصورة الأصلية للخلفية',
+        'error',
+      );
       return;
     }
-    if (form.wallpaper_type === 'dual_day_night' && !nightFile) {
-      notify('يرجى اختيار صورة الليل لخلفية النهار والليل', 'error');
+    if (hasNightVariant(form.wallpaper_type) && !nightFile) {
+      notify('يرجى اختيار صورة الليل للخلفية', 'error');
       return;
     }
 
@@ -267,7 +317,7 @@ export function WallpapersTab({
       uploadedPaths.push(dayPath);
 
       let nightImageUrl = null;
-      if (form.wallpaper_type === 'dual_day_night' && nightFile) {
+      if (hasNightVariant(form.wallpaper_type) && nightFile) {
         setUploadStage('جاري رفع صورة الليل الأصلية...');
         const nightExt = getExtensionFromFile(nightFile);
         const nightPath = `originals/${uid}_night.${nightExt}`;
@@ -291,10 +341,9 @@ export function WallpapersTab({
         is_exclusive: form.is_exclusive,
         is_pro: form.is_pro,
         is_active: form.is_active,
-        supports_auto_day_night:
-          form.wallpaper_type === 'dual_day_night'
-            ? Boolean(form.supports_auto_day_night)
-            : false,
+        supports_auto_day_night: hasNightVariant(form.wallpaper_type)
+          ? Boolean(form.supports_auto_day_night)
+          : false,
         is_builtin: false,
         sort_order: Number(form.sort_order) || 0,
       });
@@ -391,14 +440,30 @@ export function WallpapersTab({
           .eq('id', deleteTarget.id);
         if (error) throw error;
 
-        const paths = [
-          extractStoragePath(deleteTarget.image_url),
-          extractStoragePath(deleteTarget.night_image_url),
-          extractStoragePath(deleteTarget.thumbnail_url),
-        ].filter(Boolean);
+        const paths = Array.from(
+          new Set(
+            [
+              extractStoragePath(deleteTarget.image_url?.trim()),
+              extractStoragePath(deleteTarget.night_image_url?.trim()),
+              extractStoragePath(deleteTarget.thumbnail_url?.trim()),
+            ].filter(Boolean),
+          ),
+        );
 
         if (paths.length > 0) {
-          await supabase.storage.from(WALLPAPERS_BUCKET).remove(paths);
+          const { error: storageError } = await supabase.storage
+            .from(WALLPAPERS_BUCKET)
+            .remove(paths);
+          if (storageError) {
+            triggerSilentSync({ topic: 'all_users' });
+            notify(
+              `تم حذف الخلفية من القائمة، لكن تعذر حذف بعض الملفات من التخزين: ${storageError.message}`,
+              'info',
+            );
+            setDeleteTarget(null);
+            await onRefresh();
+            return;
+          }
         }
 
         triggerSilentSync({ topic: 'all_users' });
@@ -484,8 +549,9 @@ export function WallpapersTab({
   }
 
   function typeLabel(type) {
+    if (type === 'depth_dual_day_night') return 'عمق + نهار وليل';
     if (type === 'dual_day_night') return 'نهار وليل';
-    if (type === 'standard') return 'عادية';
+    if (type === 'standard' || type === 'static') return 'عادية';
     return 'عمق Depth';
   }
 
@@ -619,6 +685,11 @@ export function WallpapersTab({
                   );
                 })}
               </div>
+              {form.wallpaper_type === 'depth_dual_day_night' && (
+                <span className="field-hint">
+                  تجمع بين تأثير العمق ثلاثي الأبعاد (3D Depth) ونسختي النهار والليل مع التبديل التلقائي
+                </span>
+              )}
             </div>
 
             <div className="field">
@@ -639,12 +710,12 @@ export function WallpapersTab({
           </div>
 
           <div
-            className={`form-grid ${form.wallpaper_type === 'dual_day_night' ? 'cols-2' : ''}`}
+            className={`form-grid ${hasNightVariant(form.wallpaper_type) ? 'cols-2' : ''}`}
             style={{ marginBottom: 15 }}
           >
             <div className="field">
               <span className="field-label">
-                {form.wallpaper_type === 'dual_day_night'
+                {hasNightVariant(form.wallpaper_type)
                   ? 'صورة النهار الأصلية *'
                   : 'الصورة الأصلية (بدون ضغط) *'}
                 {dayFile && (
@@ -665,14 +736,18 @@ export function WallpapersTab({
                 ) : (
                   <>
                     <Upload size={25} />
-                    <strong>اختر الصورة أو اسحبها هنا</strong>
+                    <strong>
+                      {hasNightVariant(form.wallpaper_type)
+                        ? 'اختر صورة النهار أو اسحبها هنا'
+                        : 'اختر الصورة أو اسحبها هنا'}
+                    </strong>
                     <span className="field-hint">JPG / PNG / WebP • ترفع بجودتها الأصلية 100%</span>
                   </>
                 )}
               </label>
             </div>
 
-            {form.wallpaper_type === 'dual_day_night' && (
+            {hasNightVariant(form.wallpaper_type) && (
               <div className="field">
                 <span className="field-label">
                   صورة الليل الأصلية *
@@ -699,7 +774,7 @@ export function WallpapersTab({
                     <>
                       <Moon size={25} />
                       <strong>اختر صورة الليل</strong>
-                      <span className="field-hint">تُعرض تلقائياً في الوضع الليلي</span>
+                      <span className="field-hint">تُعرض تلقائياً في الوضع الليلي • جودة أصلية 100%</span>
                     </>
                   )}
                 </label>
@@ -768,13 +843,13 @@ export function WallpapersTab({
               />
             </div>
 
-            {form.wallpaper_type === 'dual_day_night' && (
+            {hasNightVariant(form.wallpaper_type) && (
               <div className="switch-row" style={{ gridColumn: '1 / -1' }}>
                 <div className="switch-meta">
                   <span className="switch-title">
                     <Sun size={15} color="var(--amber)" />
                     <Moon size={14} color="var(--sky)" />
-                    يدعم التبديل التلقائي ليل/نهار
+                    تبديل تلقائي نهار/ليل
                   </span>
                   <span className="switch-desc">
                     يتيح للتطبيق تبديل الخلفية تلقائياً بين نسخة النهار والليل حسب الوقت أو وضع الهاتف
@@ -784,7 +859,7 @@ export function WallpapersTab({
                   checked={Boolean(form.supports_auto_day_night)}
                   onChange={(v) => setForm((p) => ({ ...p, supports_auto_day_night: v }))}
                   tone="sky"
-                  ariaLabel="يدعم التبديل التلقائي ليل/نهار"
+                  ariaLabel="تبديل تلقائي نهار/ليل"
                 />
               </div>
             )}
@@ -871,6 +946,27 @@ export function WallpapersTab({
           ))}
         </div>
 
+        <div className="filter-strip" style={{ marginBottom: 8 }}>
+          <span className="field-hint" style={{ marginLeft: 4 }}>النوع:</span>
+          {[
+            { id: 'all', label: 'الكل', count: typeCounts.all },
+            { id: 'depth', label: 'عمق Depth', count: typeCounts.depth },
+            { id: 'dual_day_night', label: 'نهار وليل', count: typeCounts.dual },
+            { id: 'depth_dual_day_night', label: 'عمق + نهار وليل', count: typeCounts.combined },
+            { id: 'standard', label: 'عادية', count: typeCounts.standard },
+          ].map((tp) => (
+            <button
+              key={tp.id}
+              type="button"
+              className={`chip${selectedType === tp.id ? ' active' : ''}`}
+              onClick={() => setSelectedType(tp.id)}
+            >
+              {tp.label}
+              <span className="chip-count">({tp.count})</span>
+            </button>
+          ))}
+        </div>
+
         <div className="filter-strip" style={{ marginBottom: 0 }}>
           <span className="field-hint" style={{ marginLeft: 4 }}>الجمهور:</span>
           {[
@@ -907,7 +1003,8 @@ export function WallpapersTab({
       ) : (
         <div className="wallpapers-grid">
           {filteredWallpapers.map((wp) => {
-            const isDual = wp.wallpaper_type === 'dual_day_night' && wp.night_image_url;
+            const isDual = hasNightVariant(wp.wallpaper_type) && Boolean(wp.night_image_url);
+            const isDepth = hasDepthSupport(wp.wallpaper_type);
             const showingNight = Boolean(nightPreviewMap[wp.id]);
             const candidateSrc =
               isDual && showingNight
@@ -926,10 +1023,12 @@ export function WallpapersTab({
                   ) : (
                     <div className="builtin-media-art">
                       <div className="builtin-media-icon">
-                        {wp.wallpaper_type === 'dual_day_night' ? (
+                        {isDepth ? (
+                          <Layers size={26} />
+                        ) : hasNightVariant(wp.wallpaper_type) ? (
                           <Sun size={26} />
                         ) : (
-                          <Layers size={26} />
+                          <ImageIcon size={26} />
                         )}
                       </div>
                       <strong style={{ fontSize: '0.96rem' }}>{wp.title_ar}</strong>
@@ -944,7 +1043,11 @@ export function WallpapersTab({
 
                   <div className="wallpaper-overlay-top">
                     <div className="wallpaper-overlay-badges">
-                      <span className="wallpaper-media-pill">{typeLabel(wp.wallpaper_type)}</span>
+                      <span className="wallpaper-media-pill">
+                        {isDepth && <Layers size={11} />}
+                        {hasNightVariant(wp.wallpaper_type) && <Sun size={11} />}
+                        {typeLabel(wp.wallpaper_type)}
+                      </span>
                       {wp.is_builtin && (
                         <span className="badge badge-sky">
                           <HardDrive size={11} /> مدمجة
@@ -1078,14 +1181,14 @@ export function WallpapersTab({
                       >
                         <Sun size={13} color="var(--amber)" />
                         <Moon size={12} color="var(--sky)" />
-                        يدعم التبديل التلقائي ليل/نهار
+                        تبديل تلقائي نهار/ليل
                       </span>
                       <ToggleSwitch
                         checked={Boolean(wp.supports_auto_day_night)}
                         disabled={isBusy}
                         tone="sky"
                         onChange={() => handleToggleFlag(wp, 'supports_auto_day_night')}
-                        ariaLabel={`يدعم التبديل التلقائي ليل/نهار لـ ${wp.title_ar}`}
+                        ariaLabel={`تبديل تلقائي نهار/ليل لـ ${wp.title_ar}`}
                       />
                     </div>
                   )}
@@ -1129,14 +1232,26 @@ export function WallpapersTab({
                       <span className="mono">{wp.downloads_count || 0}</span> تحميل
                     </span>
                     {isHttpUrl(wp.image_url) ? (
-                      <a
-                        href={wp.image_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        style={{ color: 'var(--text-primary)', textDecoration: 'none', fontWeight: 600 }}
-                      >
-                        عرض الأصل ↗
-                      </a>
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+                        {isDual && isHttpUrl(wp.night_image_url) && (
+                          <a
+                            href={wp.night_image_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ color: 'var(--sky)', textDecoration: 'none', fontWeight: 600 }}
+                          >
+                            أصل الليل ↗
+                          </a>
+                        )}
+                        <a
+                          href={wp.image_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ color: 'var(--text-primary)', textDecoration: 'none', fontWeight: 600 }}
+                        >
+                          {isDual ? 'أصل النهار ↗' : 'عرض الأصل ↗'}
+                        </a>
+                      </div>
                     ) : (
                       <span style={{ color: 'var(--sky)', fontWeight: 600 }}>أصل مدمج أوفلاين</span>
                     )}
@@ -1298,7 +1413,9 @@ export function WallpapersTab({
         message={
           deleteTarget?.is_builtin
             ? `سيتم إخفاء الخلفية المدمجة "${deleteTarget?.title_ar || ''}" فوراً من التطبيق عبر المزامنة الفورية، ويمكنك استعادتها في أي وقت من فلتر "مخفية".`
-            : `هل أنت متأكد من حذف الخلفية "${deleteTarget?.title_ar || ''}"؟ سيتم حذف الصورة الأصلية والمصغّرة نهائياً.`
+            : hasNightVariant(deleteTarget?.wallpaper_type) && deleteTarget?.night_image_url
+              ? `هل أنت متأكد من حذف الخلفية "${deleteTarget?.title_ar || ''}"؟ سيتم حذف صورتي النهار والليل الأصليتين والصورة المصغّرة نهائياً.`
+              : `هل أنت متأكد من حذف الخلفية "${deleteTarget?.title_ar || ''}"؟ سيتم حذف الصورة الأصلية والمصغّرة نهائياً.`
         }
         confirmText={deleteTarget?.is_builtin ? 'إخفاء من التطبيق' : 'تأكيد الحذف'}
         busy={deleting}
